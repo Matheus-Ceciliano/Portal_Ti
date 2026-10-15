@@ -1,0 +1,28 @@
+# Normalização de fim de linha (Etapa 0, docs/AMBIENTES.md §5).
+# O repositório guarda LF; a cópia de trabalho também usa LF, inclusive no
+# Windows, porque a imagem Docker e o CI rodam em Linux. Isto prevalece sobre
+# o core.autocrlf=true que o Git for Windows define na configuração do sistema.
+* text=auto eol=lf
+
+# Scripts executados pelo Windows mantêm CRLF.
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+*.psd1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Binários: sem conversão de fim de linha nem diff textual.
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.zip binary
+*.xlsx binary
+*.docx binary

@@ -1,0 +1,108 @@
+# Dependências
+node_modules/
+
+# Build
+dist/
+build/
+.next/
+out/
+
+# Ambiente
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# Testes / Playwright
+test-results/
+playwright-report/
+.playwright-mcp/
+
+# Python
+__pycache__/
+.venv/
+
+# Sistema / editor
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# Claude Code (configurações e anotações locais)
+.claude/settings.local.json
+CLAUDE.local.md
+
+# Materiais da TI com dados pessoais ou credenciais (R-21, R-23).
+# Não versionar até a TI produzir versões sanitizadas. Atenção: o .gitignore
+# não protege contra "git add -f" nem remove arquivos já rastreados.
+/TER - TDV/
+TER_VALLUR_*.html
+TDV_VALLUR_*.html
+/docs/SGSI/
+/docs/Inventário/
+/docs/dISTRIBUIÇÃO DE CUSTOS/
+SGSI*.xlsx
+TeamsReport.zip
+*.zip
+*.xlsx
+*.xlsm
+*.xls
+*.csv
+!tests/fixtures/**/*.csv
+
+# Segredos, certificados e chaves
+*.pem
+*.key
+*.pfx
+*.p12
+*.cer
+*.crt
+*.jks
+secrets/
+.secrets/
+certs/
+# Chaves SSH, cofres de senha e perfis de VPN (Etapa 0)
+id_rsa*
+id_ecdsa*
+id_ed25519*
+*.ppk
+*.kdbx
+*.ovpn
+# Pode conter token de registro npm; se o projeto precisar de um .npmrc sem
+# segredos, versioná-lo com exceção explícita e revisão (docs/SEGURANCA_REPOSITORIO.md)
+.npmrc
+
+# Cópias de banco, dumps e diagnósticos (podem conter dados reais ou segredos)
+*.dump
+*.backup
+*.bak
+backups/
+*.sql.gz
+*.heapsnapshot
+*.cpuprofile
+# Volumes locais de banco e storage em Docker, e estado local da CLI do Supabase
+.data/
+pgdata/
+minio-data/
+supabase/.temp/
+supabase/.branches/
+*.sqlite
+*.db
+
+# Artefatos de teste e build que podem guardar sessões ou respostas
+playwright/.auth/
+blob-report/
+*.har
+coverage/
+*.tsbuildinfo
+
+# Next.js / Prisma (Etapa 1)
+.next-e2e/
+.next-build/
+next-env.d.ts
+.vercel/
+/src/generated/

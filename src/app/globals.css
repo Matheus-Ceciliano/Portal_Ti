@@ -1,0 +1,225 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+/*
+ * Tokens do Portal TI Vallur (docs/DESIGN_SYSTEM.md §2). Componentes usam apenas os
+ * tokens semânticos; nenhum hex direto nas telas. O modo escuro foi pedido na Etapa 1:
+ * pares recalculados (contraste ≥ 4.5:1 para texto e ≥ 3:1 para componentes).
+ */
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--fonte-principal), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+  --font-heading: var(--fonte-principal), ui-sans-serif, system-ui, sans-serif;
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-titulo: var(--titulo);
+  --color-link: var(--link);
+  --color-sucesso: var(--sucesso);
+  --color-sucesso-fundo: var(--sucesso-fundo);
+  --color-atencao: var(--atencao);
+  --color-atencao-fundo: var(--atencao-fundo);
+  --color-erro: var(--erro);
+  --color-erro-fundo: var(--erro-fundo);
+  --color-info: var(--info);
+  --color-info-fundo: var(--info-fundo);
+  --color-manual: var(--manual);
+  --color-manual-fundo: var(--manual-fundo);
+  --color-neutro: var(--neutro);
+  --color-neutro-fundo: var(--neutro-fundo);
+  --color-faixa: var(--faixa);
+  --color-faixa-fundo: var(--faixa-fundo);
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 10px;
+  --radius-2xl: 12px;
+  --radius-3xl: 14px;
+  --radius-4xl: 16px;
+  --shadow-nivel-1: 0 1px 2px rgb(16 24 40 / 0.06);
+  --shadow-nivel-2: 0 8px 24px rgb(16 24 40 / 0.12);
+}
+
+:root {
+  /* Source Sans 3 (SIL OFL) servida pelo próprio portal, a partir do pacote @fontsource-variable. */
+  --fonte-principal: "Source Sans 3 Variable";
+  --radius: 0.5rem;
+  --background: #f4f6f9; /* cinza-50 */
+  --foreground: #344054; /* cinza-700 */
+  --titulo: #101828; /* cinza-950 */
+  --card: #ffffff;
+  --card-foreground: #344054;
+  --popover: #ffffff;
+  --popover-foreground: #344054;
+  --primary: #2764a5; /* azul-700, ação */
+  --primary-hover: #1f5189; /* azul-800 */
+  --primary-foreground: #ffffff;
+  --link: #2764a5;
+  --secondary: #f2f4f7;
+  --secondary-foreground: #344054;
+  --muted: #f2f4f7;
+  --muted-foreground: #475467; /* cinza-600 */
+  --accent: #eaf1f9; /* azul-50 */
+  --accent-foreground: #1f5189;
+  --destructive: #b42318;
+  --border: #e4e7ec; /* cinza-200: só divisórias */
+  --input: #7d8799; /* cinza-450: contorno de campos (3.62:1) */
+  --ring: #2764a5;
+  --chart-1: #2764a5;
+  --chart-2: #17365d;
+  --chart-3: #067647;
+  --chart-4: #b54708;
+  --chart-5: #667085;
+  --sidebar: #17365d; /* azul-900, PM §18 */
+  --sidebar-foreground: #c7d7ea;
+  --sidebar-primary: #8db4e2;
+  --sidebar-primary-foreground: #17365d;
+  --sidebar-accent: #22487a;
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: #22487a;
+  --sidebar-ring: #8db4e2;
+  --sucesso: #067647;
+  --sucesso-fundo: #ecfdf3;
+  --atencao: #b54708;
+  --atencao-fundo: #fffaeb;
+  --erro: #b42318;
+  --erro-fundo: #fef3f2;
+  --info: #1f5189;
+  --info-fundo: #eaf1f9;
+  --manual: #6941c6;
+  --manual-fundo: #f4f3ff;
+  --neutro: #475467;
+  --neutro-fundo: #f2f4f7;
+  --faixa: #7a2e0e;
+  --faixa-fundo: #fef0c7;
+}
+
+.dark {
+  --background: #0f1726;
+  --foreground: #d0d7e2;
+  --titulo: #f1f4f8;
+  --card: #162133;
+  --card-foreground: #d0d7e2;
+  --popover: #162133;
+  --popover-foreground: #d0d7e2;
+  --primary: #2f6db5;
+  --primary-hover: #285e9c;
+  --primary-foreground: #ffffff;
+  --link: #8db4e2;
+  --secondary: #1d2b40;
+  --secondary-foreground: #d0d7e2;
+  --muted: #1d2b40;
+  --muted-foreground: #98a6b9;
+  --accent: #1c2f4a;
+  --accent-foreground: #c7d7ea;
+  --destructive: #d92d20;
+  --border: #253349;
+  --input: #5e6e86;
+  --ring: #8db4e2;
+  --chart-1: #5b93d3;
+  --chart-2: #8db4e2;
+  --chart-3: #47cd89;
+  --chart-4: #fdb022;
+  --chart-5: #98a6b9;
+  --sidebar: #0b1626;
+  --sidebar-foreground: #c7d7ea;
+  --sidebar-primary: #8db4e2;
+  --sidebar-primary-foreground: #0b1626;
+  --sidebar-accent: #1c3557;
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: #1c2a40;
+  --sidebar-ring: #8db4e2;
+  --sucesso: #75e0a7;
+  --sucesso-fundo: #0f2a1f;
+  --atencao: #fdb022;
+  --atencao-fundo: #2e2210;
+  --erro: #fda29b;
+  --erro-fundo: #3a1816;
+  --info: #8db4e2;
+  --info-fundo: #13253d;
+  --manual: #bdb4fe;
+  --manual-fundo: #241c45;
+  --neutro: #c2cbd8;
+  --neutro-fundo: #222e40;
+  --faixa: #fec84b;
+  --faixa-fundo: #3d2a0a;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html {
+    @apply font-sans;
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-size: 16px;
+    line-height: 1.5;
+  }
+  @media (min-width: 1024px) {
+    .densidade-ti {
+      font-size: 14px;
+      line-height: 20px;
+    }
+  }
+  h1,
+  h2,
+  h3 {
+    @apply text-titulo;
+    text-wrap: balance;
+  }
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}

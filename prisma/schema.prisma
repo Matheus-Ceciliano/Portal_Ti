@@ -1,0 +1,275 @@
+// Portal TI Vallur — esquema inicial da Etapa 1.
+// Modelos ContaAcesso, Sessao, CredencialConta, Verificacao e FatorMfa são as tabelas
+// da biblioteca de autenticação (Better Auth: user, session, account, verification,
+// twoFactor), renomeadas para o domínio do portal. Nenhum campo guarda senha em texto.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum SituacaoColaborador {
+  PRE_CADASTRO
+  ATIVO
+  AFASTADO
+  DESLIGADO
+}
+
+enum SituacaoConta {
+  ATIVA
+  BLOQUEADA
+  DESATIVADA
+}
+
+enum Perfil {
+  ESTAGIARIO_TI
+  SUPERVISOR_TI
+  GESTOR_ADM
+}
+
+enum VisaoPainel {
+  OPERACIONAL
+  GERENCIAL
+}
+
+enum ResultadoAuditoria {
+  SUCESSO
+  NEGADO
+  FALHA
+}
+
+/// Ambiente gravado na criação do banco (DA-23). Comparado com AMBIENTE na inicialização.
+model Instalacao {
+  id       Int      @id @default(1)
+  ambiente String
+  criadoEm DateTime @default(now()) @map("criado_em")
+
+  @@map("instalacao")
+}
+
+model Empresa {
+  id            String        @id @default(uuid())
+  nome          String        @unique
+  sigla         String        @unique
+  cnpj          String        @unique
+  cidade        String
+  ativa         Boolean       @default(true)
+  criadoEm      DateTime      @default(now()) @map("criado_em")
+  colaboradores Colaborador[]
+
+  @@map("empresa")
+}
+
+model Colaborador {
+  id                    String                @id @default(uuid())
+  nome                  String
+  emailCorporativo      String                @unique @map("email_corporativo")
+  cargo                 String
+  departamento          String
+  empresaId             String                @map("empresa_id")
+  empresa               Empresa               @relation(fields: [empresaId], references: [id])
+  situacao              SituacaoColaborador   @default(ATIVO)
+  /// Identidade Microsoft para integrações. Nunca é chave de login (DT-01).
+  entraObjectId         String?               @unique @map("entra_object_id")
+  criadoEm              DateTime              @default(now()) @map("criado_em")
+  atualizadoEm          DateTime              @updatedAt @map("atualizado_em")
+  conta                 ContaAcesso?
+  perfis                PerfilAtribuido[]
+  permissoesIndividuais PermissaoIndividual[]
+
+  @@index([empresaId])
+  @@map("colaborador")
+}
+
+model PerfilAtribuido {
+  id            String      @id @default(uuid())
+  colaboradorId String      @map("colaborador_id")
+  colaborador   Colaborador @relation(fields: [colaboradorId], references: [id])
+  perfil        Perfil
+  justificativa String
+  atribuidoPor  String?     @map("atribuido_por")
+  atribuidoEm   DateTime    @default(now()) @map("atribuido_em")
+  revogadoPor   String?     @map("revogado_por")
+  revogadoEm    DateTime?   @map("revogado_em")
+
+  @@index([colaboradorId])
+  @@map("perfil_atribuido")
+}
+
+model PermissaoIndividual {
+  id            String      @id @default(uuid())
+  colaboradorId String      @map("colaborador_id")
+  colaborador   Colaborador @relation(fields: [colaboradorId], references: [id])
+  permissao     String
+  justificativa String
+  concedidaPor  String      @map("concedida_por")
+  concedidaEm   DateTime    @default(now()) @map("concedida_em")
+  validaAte     DateTime?   @map("valida_ate")
+  revogadaPor   String?     @map("revogada_por")
+  revogadaEm    DateTime?   @map("revogada_em")
+
+  @@index([colaboradorId])
+  @@map("permissao_individual")
+}
+
+/// Conta de acesso ao portal (tabela "user" da biblioteca de autenticação).
+model ContaAcesso {
+  id                         String            @id
+  name                       String
+  email                      String            @unique
+  emailVerified              Boolean           @default(false) @map("email_verified")
+  image                      String?
+  createdAt                  DateTime          @default(now()) @map("criado_em")
+  updatedAt                  DateTime          @updatedAt @map("atualizado_em")
+  twoFactorEnabled           Boolean?          @default(false) @map("mfa_habilitado")
+  colaboradorId              String            @unique @map("colaborador_id")
+  colaborador                Colaborador       @relation(fields: [colaboradorId], references: [id])
+  situacao                   SituacaoConta     @default(ATIVA)
+  /// Nulo enquanto vale a senha definida pela TI: a conta só acessa /conta/ativar.
+  senhaPessoalDefinidaEm     DateTime?         @map("senha_pessoal_definida_em")
+  /// Código de ativação do perfil de TI validado (etapa 1 da ativação).
+  ativacaoTiCodigoValidadoEm DateTime?         @map("ativacao_ti_codigo_validado_em")
+  /// Ativação do perfil de TI concluída (senha pessoal + MFA com código de uso único).
+  ativacaoTiConcluidaEm      DateTime?         @map("ativacao_ti_concluida_em")
+  visaoPainel                VisaoPainel?      @map("visao_painel")
+  ultimoAcessoEm             DateTime?         @map("ultimo_acesso_em")
+  sessoes                    Sessao[]
+  credenciais                CredencialConta[]
+  fatores                    FatorMfa[]
+  codigosAtivacao            CodigoAtivacao[]
+  codigosTotpUsados          CodigoTotpUsado[]
+
+  @@map("conta_acesso")
+}
+
+/// Sessão (tabela "session" da biblioteca). Revogar = excluir a linha.
+model Sessao {
+  id              String      @id
+  expiresAt       DateTime    @map("expira_em")
+  token           String      @unique
+  createdAt       DateTime    @default(now()) @map("criada_em")
+  updatedAt       DateTime    @updatedAt @map("atualizada_em")
+  ipAddress       String?     @map("ip")
+  userAgent       String?     @map("user_agent")
+  userId          String      @map("conta_id")
+  conta           ContaAcesso @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Segundo fator verificado nesta sessão (exigido para a área de TI).
+  mfaVerificadoEm DateTime?   @map("mfa_verificado_em")
+  ultimoUsoEm     DateTime?   @map("ultimo_uso_em")
+
+  @@index([userId])
+  @@map("sessao")
+}
+
+/// Credencial (tabela "account" da biblioteca). Só o provedor "credential" é usado.
+model CredencialConta {
+  id                    String      @id
+  accountId             String      @map("account_id")
+  providerId            String      @map("provider_id")
+  userId                String      @map("conta_id")
+  conta                 ContaAcesso @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?     @map("access_token")
+  refreshToken          String?     @map("refresh_token")
+  idToken               String?     @map("id_token")
+  accessTokenExpiresAt  DateTime?   @map("access_token_expira_em")
+  refreshTokenExpiresAt DateTime?   @map("refresh_token_expira_em")
+  scope                 String?
+  /// Hash Argon2id (formato PHC) com pepper. Nunca a senha.
+  password              String?     @map("hash_senha")
+  createdAt             DateTime    @default(now()) @map("criado_em")
+  updatedAt             DateTime    @updatedAt @map("atualizado_em")
+
+  @@index([userId])
+  @@map("credencial_conta")
+}
+
+model Verificacao {
+  id         String   @id
+  identifier String   @map("identificador")
+  value      String   @map("valor")
+  expiresAt  DateTime @map("expira_em")
+  createdAt  DateTime @default(now()) @map("criado_em")
+  updatedAt  DateTime @updatedAt @map("atualizado_em")
+
+  @@index([identifier])
+  @@map("verificacao")
+}
+
+/// Segredo TOTP cifrado e códigos de recuperação cifrados (tabela "twoFactor" da biblioteca).
+model FatorMfa {
+  id                      String      @id
+  secret                  String      @map("segredo_cifrado")
+  backupCodes             String      @map("codigos_recuperacao_cifrados")
+  userId                  String      @map("conta_id")
+  conta                   ContaAcesso @relation(fields: [userId], references: [id], onDelete: Cascade)
+  verified                Boolean?    @default(true) @map("verificado")
+  failedVerificationCount Int?        @default(0) @map("falhas_verificacao")
+  lockedUntil             DateTime?   @map("bloqueado_ate")
+
+  @@index([secret])
+  @@index([userId])
+  @@map("fator_mfa")
+}
+
+/// Código de ativação de perfil de TI: uso único, guardado só como HMAC, com validade.
+model CodigoAtivacao {
+  id           String      @id @default(uuid())
+  contaId      String      @map("conta_id")
+  conta        ContaAcesso @relation(fields: [contaId], references: [id], onDelete: Cascade)
+  hashCodigo   String      @unique @map("hash_codigo")
+  criadoPor    String?     @map("criado_por")
+  criadoEm     DateTime    @default(now()) @map("criado_em")
+  expiraEm     DateTime    @map("expira_em")
+  usadoEm      DateTime?   @map("usado_em")
+  invalidadoEm DateTime?   @map("invalidado_em")
+  tentativas   Int         @default(0)
+
+  @@index([contaId])
+  @@map("codigo_ativacao")
+}
+
+/// Códigos TOTP já aceitos (impede reutilização dentro da janela de validade).
+model CodigoTotpUsado {
+  contaId    String      @map("conta_id")
+  conta      ContaAcesso @relation(fields: [contaId], references: [id], onDelete: Cascade)
+  hashCodigo String      @map("hash_codigo")
+  usadoEm    DateTime    @default(now()) @map("usado_em")
+
+  @@id([contaId, hashCodigo])
+  @@map("codigo_totp_usado")
+}
+
+/// Limitador de tentativas por IP e por e-mail (HMAC), antes de qualquer hash (DA-27).
+model LimiteTentativa {
+  chave        String    @id
+  falhas       Int       @default(0)
+  janelaInicio DateTime  @map("janela_inicio")
+  bloqueadoAte DateTime? @map("bloqueado_ate")
+
+  @@map("limite_tentativa")
+}
+
+/// Trilha de auditoria. Somente metadados; nunca senha, hash ou segredo.
+model EventoAuditoria {
+  id              String             @id @default(uuid())
+  criadoEm        DateTime           @default(now()) @map("criado_em")
+  ambiente        String
+  acao            String
+  resultado       ResultadoAuditoria
+  atorContaId     String?            @map("ator_conta_id")
+  atorNome        String?            @map("ator_nome")
+  alvoTipo        String?            @map("alvo_tipo")
+  alvoId          String?            @map("alvo_id")
+  alvoDescricao   String?            @map("alvo_descricao")
+  origemPermissao String?            @map("origem_permissao")
+  detalhe         Json?
+  simulado        Boolean            @default(false)
+
+  @@index([criadoEm])
+  @@index([acao])
+  @@map("evento_auditoria")
+}
