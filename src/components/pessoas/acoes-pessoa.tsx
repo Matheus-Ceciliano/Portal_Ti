@@ -92,7 +92,7 @@ function useConcluir(estado: EstadoAcao, fechar: () => void) {
   }, [estado, fechar]);
 }
 
-function DialogoSenha({ colaboradorId, nome, aberto, fechar }: Props & { aberto: boolean; fechar: () => void }) {
+export function DialogoSenha({ colaboradorId, nome, aberto, fechar }: { colaboradorId: string; nome: string; aberto: boolean; fechar: () => void }) {
   const { estado, pendente, aoEnviar } = useFormularioAcao<EstadoAcao>(acaoRedefinirSenha, {});
   useConcluir(estado, fechar);
   return (

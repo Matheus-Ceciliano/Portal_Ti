@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import "@fontsource-variable/source-sans-3";
+import "@fontsource-variable/plus-jakarta-sans";
 import { ProvedorTema } from "@/components/tema/provedor-tema";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";

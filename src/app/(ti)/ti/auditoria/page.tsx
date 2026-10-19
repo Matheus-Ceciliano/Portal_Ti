@@ -1,10 +1,10 @@
 import { ScrollText } from "lucide-react";
 import Link from "next/link";
+import { CampoBusca, Selecao } from "@/components/comum/campos";
 import { CabecalhoPagina, EstadoVazio, formatarDataHora } from "@/components/comum/pagina";
 import { Estado, StatusBadge } from "@/components/comum/status-badge";
 import { Paginacao, texto, type Parametros } from "@/components/comum/tabela";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { exigirPaginaTi } from "@/server/auth/pagina";
 import { listarAuditoria } from "@/server/modulos/consultas";
 
@@ -32,20 +32,20 @@ export default async function PaginaAuditoria({
         titulo="Auditoria"
         descricao="Eventos reais gravados pelo portal: somente metadados, nunca senhas, hashes ou segredos. Ninguém altera ou exclui eventos."
       />
-      <div className="rounded-lg border bg-card shadow-nivel-1">
+      <div className="rounded-2xl border bg-card shadow-nivel-1">
         <form method="get" role="search" aria-label="Filtrar eventos" className="grid gap-3 border-b p-4 sm:grid-cols-[1fr_200px_auto] sm:px-5">
           <div>
             <label htmlFor="acao" className="sr-only">Ação</label>
-            <Input id="acao" name="acao" type="search" defaultValue={parametros.acao} placeholder="Ação, por exemplo perfil.atribuir" />
+            <CampoBusca id="acao" name="acao" defaultValue={parametros.acao} placeholder="Ação, por exemplo perfil.atribuir" />
           </div>
           <div>
             <label htmlFor="resultado" className="sr-only">Resultado</label>
-            <select id="resultado" name="resultado" defaultValue={parametros.resultado ?? ""} className="h-11 w-full rounded-md border border-input bg-card px-3 text-base lg:h-9 md:text-sm">
+            <Selecao id="resultado" name="resultado" defaultValue={parametros.resultado ?? ""}>
               <option value="">Todos os resultados</option>
               <option value="SUCESSO">Sucesso</option>
               <option value="NEGADO">Negado</option>
               <option value="FALHA">Falha</option>
-            </select>
+            </Selecao>
           </div>
           <div className="flex gap-2">
             <Button type="submit" variant="outline">Filtrar</Button>

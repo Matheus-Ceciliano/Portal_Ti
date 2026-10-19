@@ -1,17 +1,18 @@
 /**
  * DADOS FICTÍCIOS de desenvolvimento. Nomes, e-mails (domínio reservado .test),
  * CNPJs e patrimônios são inventados. Nada aqui vem das planilhas da TI.
+ * CNPJs são alfanuméricos com "TESTE" na base (formato válido, claramente fictício).
  * Empresas e pessoas são gravadas no banco pelo seed; os demais conjuntos ficam em
  * memória até os módulos correspondentes existirem.
  */
 
-export type EmpresaFicticia = { id: string; nome: string; sigla: string; cnpj: string; cidade: string };
+export type EmpresaFicticia = { id: string; nome: string; sigla: string; nomeCurtoSenha: string; cnpj: string; cidade: string; responsavel: string };
 
 export const EMPRESAS: EmpresaFicticia[] = [
-  { id: "a1f0c7e2-0000-4000-8000-000000000001", nome: "Horizonte Engenharia Ltda.", sigla: "HZE", cnpj: "00.111.222/0001-01", cidade: "Belo Horizonte" },
-  { id: "a1f0c7e2-0000-4000-8000-000000000002", nome: "Pedra Branca Construções S.A.", sigla: "PBC", cnpj: "00.111.222/0001-02", cidade: "Contagem" },
-  { id: "a1f0c7e2-0000-4000-8000-000000000003", nome: "Rio Claro Infraestrutura Ltda.", sigla: "RCI", cnpj: "00.111.222/0001-03", cidade: "Uberlândia" },
-  { id: "a1f0c7e2-0000-4000-8000-000000000004", nome: "Atalaia Serviços Administrativos Ltda.", sigla: "ASA", cnpj: "00.111.222/0001-04", cidade: "Belo Horizonte" },
+  { id: "a1f0c7e2-0000-4000-8000-000000000001", nome: "Horizonte Engenharia Ltda.", sigla: "HZE", nomeCurtoSenha: "Horizonte", cnpj: "VLRTESTE000160", responsavel: "Marcos Vieira", cidade: "Belo Horizonte" },
+  { id: "a1f0c7e2-0000-4000-8000-000000000002", nome: "Pedra Branca Construções S.A.", sigla: "PBC", nomeCurtoSenha: "PedraBranca", cnpj: "VLRTESTE000241", responsavel: "Renata Campos", cidade: "Contagem" },
+  { id: "a1f0c7e2-0000-4000-8000-000000000003", nome: "Rio Claro Infraestrutura Ltda.", sigla: "RCI", nomeCurtoSenha: "RioClaro", cnpj: "VLRTESTE000322", responsavel: "Eduardo Pires", cidade: "Uberlândia" },
+  { id: "a1f0c7e2-0000-4000-8000-000000000004", nome: "Atalaia Serviços Administrativos Ltda.", sigla: "ASA", nomeCurtoSenha: "Atalaia", cnpj: "VLRTESTE000403", responsavel: "Cláudia Menezes", cidade: "Belo Horizonte" },
 ];
 
 export type PessoaFicticia = {

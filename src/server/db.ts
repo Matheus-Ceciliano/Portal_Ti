@@ -9,7 +9,11 @@ function criarCliente() {
   return new PrismaClient({ adapter });
 }
 
-export const prisma = global.prismaVallur ?? criarCliente();
+// Em desenvolvimento o cliente fica em cache entre recargas. Depois de `prisma generate`
+// (migração nova) a classe muda: o cliente antigo não conhece os campos novos, então um
+// novo é criado. O antigo não é desconectado: módulos ainda não recarregados podem usá-lo.
+const anterior = global.prismaVallur;
+export const prisma = anterior instanceof PrismaClient ? anterior : criarCliente();
 
 if (process.env.NODE_ENV !== "production") global.prismaVallur = prisma;
 

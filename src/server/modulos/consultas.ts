@@ -2,36 +2,46 @@ import type { Prisma } from "@/generated/prisma/client";
 import { obterConectores } from "@/integrations/fabrica";
 import type { CenarioSimulacao } from "@/integrations/core/tipos";
 import type { Ator } from "@/server/authz/ator";
-import { ErroAutorizacao, executarCasoDeUso, exigirPermissao } from "@/server/authz/exigir";
-import { EMPRESAS, nomeDaPessoa } from "@/server/dados-ficticios/cadastros";
-import { ATIVOS, CHAMADOS, TERMOS, TUTORIAIS } from "@/server/dados-ficticios/operacao";
+import { executarCasoDeUso, exigirPermissao } from "@/server/authz/exigir";
+import { FORA_DE_EQUIPAMENTOS, ROTULO_CATEGORIA } from "@/lib/inventario";
+import { nomeDaPessoa } from "@/server/dados-ficticios/cadastros";
+import { CHAMADOS, TUTORIAIS } from "@/server/dados-ficticios/operacao";
 import { prisma } from "@/server/db";
+import { listarMeusDocumentos } from "./termos";
 
-const nomeEmpresa = (id: string) => EMPRESAS.find((e) => e.id === id)?.nome ?? "—";
+export { listarMeusDocumentos, listarTermos } from "./termos";
 
-/* Inventário (dados fictícios em memória) */
+/* Inventário (banco do portal) */
 
-export async function listarAtivos(ator: Ator) {
+/**
+ * Equipamentos da própria pessoa: sempre filtrados pelo ator, mesmo para a TI. Entregues
+ * (sob responsabilidade desde a entrega física) e reservados (ainda não entregues).
+ */
+export async function listarMeusEquipamentos(ator: Ator) {
   return executarCasoDeUso(ator, async () => {
-    const { escopo } = exigirPermissao(ator, "ativo.ver");
-    const visiveis = escopo === "GRUPO" ? ATIVOS : ATIVOS.filter((a) => a.responsavelId === ator.colaboradorId);
-    return visiveis.map((a) => ({
-      ...a,
-      empresa: nomeEmpresa(a.empresaId),
-      responsavel: a.responsavelId ? nomeDaPessoa(a.responsavelId) : null,
+    exigirPermissao(ator, "ativo.ver");
+    const itens = await prisma.itemAlocacao.findMany({
+      where: { aberto: true, alocacao: { colaboradorId: ator.colaboradorId, estado: { in: ["ATIVA", "RESERVADA"] } } },
+      orderBy: { alocacao: { criadaEm: "desc" } },
+      select: {
+        ativo: { select: { id: true, categoria: true, nomeDispositivo: true, patrimonio: true, marca: true, modelo: true } },
+        alocacao: { select: { estado: true, entregueEm: true, previstaPara: true, criadaEm: true } },
+      },
+    });
+    return itens.map((i) => ({
+      id: i.ativo.id,
+      categoria: i.ativo.categoria,
+      tipo: ROTULO_CATEGORIA[i.ativo.categoria],
+      nome: i.ativo.nomeDispositivo,
+      patrimonio: i.ativo.patrimonio,
+      modelo: `${i.ativo.marca} ${i.ativo.modelo}`,
+      situacao: i.alocacao.estado === "ATIVA" ? ("ALOCADO" as const) : ("RESERVADO" as const),
+      desde: (i.alocacao.entregueEm ?? i.alocacao.previstaPara ?? i.alocacao.criadaEm).toISOString(),
     }));
   });
 }
 
-/** Equipamentos da própria pessoa: sempre filtrados pelo ator, mesmo para a TI. */
-export async function listarMeusEquipamentos(ator: Ator) {
-  return executarCasoDeUso(ator, async () => {
-    exigirPermissao(ator, "ativo.ver");
-    return ATIVOS.filter(
-      (a) => a.responsavelId === ator.colaboradorId && (a.situacao === "EM_USO" || a.situacao === "AGUARDANDO_ENTREGA"),
-    );
-  });
-}
+export type MeuEquipamento = Awaited<ReturnType<typeof listarMeusEquipamentos>>[number];
 
 /* Chamados */
 
@@ -54,24 +64,6 @@ export async function listarMeusChamados(ator: Ator) {
       ...c,
       responsavel: c.responsavelId ? nomeDaPessoa(c.responsavelId) : null,
     }));
-  });
-}
-
-/* Termos TER/TDV */
-
-export async function listarTermos(ator: Ator, tipo: "TER" | "TDV") {
-  return executarCasoDeUso(ator, async () => {
-    const { escopo } = exigirPermissao(ator, "termo.ver");
-    if (escopo !== "GRUPO") throw new ErroAutorizacao("termo.ver", "ESCOPO_PROPRIO");
-    return TERMOS.filter((t) => t.tipo === tipo).map((t) => ({ ...t, colaborador: nomeDaPessoa(t.colaboradorId) }));
-  });
-}
-
-/** Documentos do colaborador: só termos próprios e disponibilizados pela TI. */
-export async function listarMeusDocumentos(ator: Ator) {
-  return executarCasoDeUso(ator, async () => {
-    exigirPermissao(ator, "termo.ver");
-    return TERMOS.filter((t) => t.colaboradorId === ator.colaboradorId && t.disponibilizado);
   });
 }
 
@@ -127,12 +119,6 @@ export async function obterEstadoIntegracoes(ator: Ator, cenario: CenarioSimulac
 
 /* Painéis */
 
-function contarPor<T>(itens: T[], chave: (i: T) => string) {
-  const mapa = new Map<string, number>();
-  for (const item of itens) mapa.set(chave(item), (mapa.get(chave(item)) ?? 0) + 1);
-  return mapa;
-}
-
 export async function obterPainelTi(ator: Ator) {
   return executarCasoDeUso(ator, async () => {
     exigirPermissao(ator, "dashboard.ver");
@@ -151,16 +137,28 @@ export async function obterPainelTi(ator: Ator) {
         }),
       ]);
 
-    const ativosPorSituacao = contarPor(ATIVOS, (a) => a.situacao);
+    const semCarregador = { categoria: { notIn: FORA_DE_EQUIPAMENTOS } }; // equipamentos: sem carregadores e componentes
+    const [porSituacao, porEmpresaSituacao, empresas, termosPendentes, reservas] = await Promise.all([
+      prisma.ativo.groupBy({ by: ["situacao"], where: semCarregador, _count: { _all: true } }),
+      prisma.ativo.groupBy({ by: ["empresaId", "situacao"], where: { ...semCarregador, situacao: { in: ["ALOCADO", "DISPONIVEL"] } }, _count: { _all: true } }),
+      prisma.empresa.findMany({ orderBy: { nome: "asc" }, select: { id: true, nome: true, sigla: true } }),
+      prisma.termo.count({ where: { tipo: "TER", estado: "AGUARDANDO_ASSINATURA" } }),
+      prisma.itemAlocacao.findMany({
+        where: { aberto: true, alocacao: { estado: "RESERVADA" }, ativo: semCarregador },
+        orderBy: { alocacao: { previstaPara: "asc" } },
+        take: 8,
+        select: {
+          id: true,
+          ativo: { select: { id: true, marca: true, modelo: true, patrimonio: true, nomeDispositivo: true } },
+          alocacao: { select: { id: true, numero: true, previstaPara: true, colaborador: { select: { nome: true } } } },
+        },
+      }),
+    ]);
+    const contar = (s: string) => porSituacao.find((p) => p.situacao === s)?._count._all ?? 0;
     const chamadosAbertos = CHAMADOS.filter((c) => c.estado !== "RESOLVIDO");
     const chamadosSemResponsavel = chamadosAbertos.filter((c) => !c.responsavelId);
-    const termosPendentes = TERMOS.filter((t) => t.estado === "AGUARDANDO_ASSINATURA");
-    const equipamentosPorEmpresa = EMPRESAS.map((e) => ({
-      sigla: e.sigla,
-      nome: e.nome,
-      emUso: ATIVOS.filter((a) => a.empresaId === e.id && a.situacao === "EM_USO").length,
-      disponiveis: ATIVOS.filter((a) => a.empresaId === e.id && a.situacao === "DISPONIVEL").length,
-    }));
+    const daEmpresa = (empresaId: string, situacao: string) =>
+      porEmpresaSituacao.find((p) => p.empresaId === empresaId && p.situacao === situacao)?._count._all ?? 0;
 
     return {
       real: {
@@ -171,14 +169,25 @@ export async function obterPainelTi(ator: Ator) {
         eventosRecentes,
         pessoasPorEmpresa: pessoasPorEmpresa.map((e) => ({ nome: e.nome, sigla: e.sigla, total: e._count.colaboradores })),
       },
-      ficticio: {
-        ativosEmUso: ativosPorSituacao.get("EM_USO") ?? 0,
-        ativosDisponiveis: ativosPorSituacao.get("DISPONIVEL") ?? 0,
-        ativosEmManutencao: ativosPorSituacao.get("EM_MANUTENCAO") ?? 0,
-        aguardandoEntrega: ATIVOS.filter((a) => a.situacao === "AGUARDANDO_ENTREGA").map((a) => ({
-          ...a,
-          responsavel: nomeDaPessoa(a.responsavelId),
+      inventario: {
+        ativosAlocados: contar("ALOCADO"),
+        ativosDisponiveis: contar("DISPONIVEL"),
+        ativosEmManutencao: contar("MANUTENCAO"),
+        termosPendentes,
+        /** Reservas (entregas futuras) mais próximas. */
+        reservas: reservas.map((r) => ({
+          id: r.id,
+          ativoId: r.ativo.id,
+          alocacaoId: r.alocacao.id,
+          modelo: `${r.ativo.marca} ${r.ativo.modelo}`,
+          patrimonio: r.ativo.patrimonio ?? r.ativo.nomeDispositivo ?? "—",
+          colaborador: r.alocacao.colaborador.nome,
+          previstaPara: r.alocacao.previstaPara?.toISOString().slice(0, 10) ?? null,
         })),
+        totalReservados: contar("RESERVADO"),
+        equipamentosPorEmpresa: empresas.map((e) => ({ sigla: e.sigla, nome: e.nome, alocados: daEmpresa(e.id, "ALOCADO"), disponiveis: daEmpresa(e.id, "DISPONIVEL") })),
+      },
+      ficticio: {
         chamadosAbertos: chamadosAbertos.length,
         chamadosSemResponsavel: chamadosSemResponsavel.map((c) => ({ ...c, solicitante: nomeDaPessoa(c.solicitanteId) })),
         chamadosPorEstado: (["ABERTO", "EM_ATENDIMENTO", "AGUARDANDO_USUARIO", "RESOLVIDO"] as const).map((estado) => ({
@@ -189,8 +198,6 @@ export async function obterPainelTi(ator: Ator) {
           prioridade,
           total: chamadosAbertos.filter((c) => c.prioridade === prioridade).length,
         })),
-        termosPendentes: termosPendentes.map((t) => ({ ...t, colaborador: nomeDaPessoa(t.colaboradorId) })),
-        equipamentosPorEmpresa,
       },
     };
   });

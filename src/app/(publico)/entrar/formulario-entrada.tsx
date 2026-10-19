@@ -1,9 +1,9 @@
 "use client";
 
-import { Info } from "lucide-react";
+import { Info, LockKeyhole, Mail } from "lucide-react";
 import { useActionState, useEffect, useRef, useState } from "react";
 import { AlertaFormulario, BotaoEnvio, Campo, CampoSenha } from "@/components/comum/campos";
-import { Input } from "@/components/ui/input";
+import { InputComIcone } from "@/components/ui/input";
 import { entrar, type EstadoEntrada } from "@/server/acoes/autenticacao";
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -16,6 +16,14 @@ export function FormularioEntrada({ aviso }: { aviso?: string }) {
   const refSenha = useRef<HTMLInputElement>(null);
 
   const erros = errosLocais ?? estado.erros;
+
+  // Cada resposta do servidor ganha uma "rodada", para o alerta repetir o tremor discreto.
+  const [rodada, setRodada] = useState(0);
+  const [estadoVisto, setEstadoVisto] = useState(estado);
+  if (estado !== estadoVisto) {
+    setEstadoVisto(estado);
+    setRodada((r) => r + 1);
+  }
 
   useEffect(() => {
     if (estado.erro) refAlerta.current?.focus();
@@ -43,22 +51,23 @@ export function FormularioEntrada({ aviso }: { aviso?: string }) {
   return (
     <form action={acao} onSubmit={validarAntes} noValidate className="flex flex-col gap-5" aria-label="Entrar no portal">
       {aviso && !estado.erro ? (
-        <div role="status" className="flex gap-2 rounded-md border border-info/25 bg-info-fundo px-3 py-2.5 text-sm text-info">
-          <Info className="mt-0.5 size-4 shrink-0" aria-hidden />
+        <div role="status" className="flex items-start gap-2.5 rounded-lg border border-info/20 bg-info-fundo px-3.5 py-3 text-sm leading-5 font-medium text-info">
+          <Info className="mt-px size-4 shrink-0" aria-hidden />
           {aviso}
         </div>
       ) : null}
       {estado.erro ? (
-        <div ref={refAlerta} tabIndex={-1} className="outline-none">
+        <div key={rodada} ref={refAlerta} tabIndex={-1} className="outline-none motion-safe:animate-tremor">
           <AlertaFormulario tom="erro">{estado.erro}</AlertaFormulario>
         </div>
       ) : null}
 
       <Campo rotulo="E-mail corporativo" erro={erros?.email}>
         {(p) => (
-          <Input
+          <InputComIcone
             {...p}
             ref={refEmail}
+            icone={Mail}
             name="email"
             type="email"
             inputMode="email"
@@ -66,16 +75,18 @@ export function FormularioEntrada({ aviso }: { aviso?: string }) {
             autoCapitalize="off"
             spellCheck={false}
             defaultValue={estado.email}
-            placeholder="nome.sobrenome@empresa.com.br"
+            placeholder="nome@empresa.com.br"
           />
         )}
       </Campo>
 
       <Campo rotulo="Senha" erro={erros?.senha}>
-        {(p) => <CampoSenha {...p} ref={refSenha} name="senha" autoComplete="current-password" />}
+        {(p) => (
+          <CampoSenha {...p} ref={refSenha} icone={LockKeyhole} name="senha" autoComplete="current-password" placeholder="Sua senha do portal" />
+        )}
       </Campo>
 
-      <BotaoEnvio pendente="Entrando…" size="lg" className="w-full">
+      <BotaoEnvio pendente="Entrando…" size="lg" className="mt-1 w-full">
         Entrar
       </BotaoEnvio>
     </form>

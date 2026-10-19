@@ -7,17 +7,32 @@ import { CATALOGO, ROTULO_PERFIL, type Permissao } from "@/server/authz/catalogo
 import { pode } from "@/server/authz/exigir";
 import { prisma } from "@/server/db";
 import { obterPessoa } from "@/server/modulos/pessoas";
-import { AcoesPessoa } from "./acoes-pessoa";
+import { AcoesPessoa } from "@/components/pessoas/acoes-pessoa";
 
 export const metadata = { title: "Ficha da pessoa" };
 
-export default async function PaginaPessoa({ params }: { params: Promise<{ id: string }> }) {
+export default async function PaginaPessoa({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<{ empresa?: string }>;
+}) {
   const ator = await exigirPaginaTi("colaborador.ver", { escopoGrupo: true });
   const { id } = await params;
+  const { empresa: empresaOrigem } = await searchParams;
   if (!/^[0-9a-f-]{36}$/i.test(id)) notFound();
   const pessoa = await obterPessoa(ator, id);
   if (!pessoa) notFound();
   const alvo = (await carregarAlvo(prisma, id, { bloquear: false }))!;
+  // Veio da página da empresa: a trilha volta para ela (só se a pessoa for dessa empresa).
+  const origem =
+    empresaOrigem && /^[0-9a-f-]{36}$/i.test(empresaOrigem) && pode(ator, "empresa.ver")
+      ? await prisma.empresa.findFirst({
+          where: { id: empresaOrigem, colaboradores: { some: { id } } },
+          select: { id: true, nome: true },
+        })
+      : null;
   const conta = pessoa.conta;
   const situacaoConta = !conta
     ? "SEM_CONTA"
@@ -28,8 +43,12 @@ export default async function PaginaPessoa({ params }: { params: Promise<{ id: s
   const linhas: [string, React.ReactNode][] = [
     ["E-mail corporativo", pessoa.email],
     ["Empresa", pessoa.empresa],
-    ["Cargo", pessoa.cargo],
-    ["Departamento", pessoa.departamento],
+    ["Cargo", pessoa.cargo || "—"],
+    ["Departamento", pessoa.departamento || "—"],
+    ["Nome do servidor/PC", pessoa.nomeServidorPc ?? "—"],
+    ["Login UAU", pessoa.loginUau ?? "—"],
+    ["Login Microsoft", pessoa.loginMicrosoft ?? "—"],
+    ["Grupo de licença (local)", pessoa.grupoLicenca ?? "—"],
     ["Cadastrada em", formatarData(pessoa.criadoEm)],
     ["Identidade Microsoft", pessoa.identidadeMicrosoftVinculada ? "Vinculada" : "Não vinculada"],
   ];
@@ -46,7 +65,16 @@ export default async function PaginaPessoa({ params }: { params: Promise<{ id: s
             ))}
           </span>
         }
-        trilha={[{ rotulo: "Cadastros" }, { rotulo: "Pessoas", href: "/ti/cadastros/pessoas" }, { rotulo: pessoa.nome }]}
+        trilha={
+          origem
+            ? [
+                { rotulo: "Cadastros" },
+                { rotulo: "Empresas", href: "/ti/cadastros/empresas" },
+                { rotulo: origem.nome, href: `/ti/cadastros/empresas/${origem.id}?tab=colaboradores` },
+                { rotulo: pessoa.nome },
+              ]
+            : [{ rotulo: "Cadastros" }, { rotulo: "Pessoas", href: "/ti/cadastros/pessoas" }, { rotulo: pessoa.nome }]
+        }
         acoes={
           <AcoesPessoa
             colaboradorId={pessoa.id}

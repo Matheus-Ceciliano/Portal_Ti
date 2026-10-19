@@ -13,6 +13,7 @@ import { gerarHashSenha } from "../src/server/auth/senha";
 import { gerarCodigoAtivacao } from "../src/server/modulos/ativacao";
 import { registrarAuditoria } from "../src/server/auditoria";
 import { EMPRESAS, PESSOAS } from "../src/server/dados-ficticios/cadastros";
+import { semearInventario } from "../src/server/dados-ficticios/inventario";
 import { ROTULO_PERFIL } from "../src/server/authz/catalogo";
 
 async function principal() {
@@ -27,6 +28,8 @@ async function principal() {
   if (!instalacao) await prisma.instalacao.create({ data: { id: 1, ambiente: config.AMBIENTE } });
 
   if ((await prisma.empresa.count()) > 0) {
+    // Só acrescenta o que ainda não existe: o inventário fictício entra se não houver equipamentos.
+    if (await semearInventario(prisma)) console.log("Inventário fictício gravado (equipamentos, alocações, manutenções e termos).");
     console.log("Banco já populado. Para recomeçar: npm run db:reset");
     return;
   }
@@ -81,6 +84,7 @@ async function principal() {
     });
   }
 
+  await semearInventario(prisma);
   await registrarAuditoria(prisma, {
     acao: "sistema.seed_desenvolvimento",
     resultado: "SUCESSO",

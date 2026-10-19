@@ -7,6 +7,7 @@ export type IconeNavegacao =
   | "empresas"
   | "pessoas"
   | "inventario"
+  | "alocacoes"
   | "ter"
   | "tdv"
   | "chamados"
@@ -50,8 +51,10 @@ export function navegacaoTi(ator: Ator, contadores: { chamadosSemResponsavel: nu
       ]),
     },
     {
+      rotulo: "Inventário",
       itens: filtrar([
         { href: "/ti/inventario", rotulo: "Inventário", icone: "inventario", permissao: "ativo.ver", escopoGrupo: true },
+        { href: "/ti/alocacoes", rotulo: "Alocações", icone: "alocacoes", permissao: "ativo.ver", escopoGrupo: true },
       ]),
     },
     {

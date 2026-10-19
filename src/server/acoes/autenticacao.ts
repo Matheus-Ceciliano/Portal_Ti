@@ -138,6 +138,30 @@ export async function verificarSegundoFator(
 
 /* Sair */
 
+/**
+ * Encerra a sessão e devolve o resultado (sem redirecionar no servidor), para o diálogo
+ * de confirmação exibir carregamento e erro. O cliente navega depois com recarga completa.
+ */
+export async function encerrarSessao(): Promise<{ ok: boolean }> {
+  try {
+    const contexto = await obterSessao();
+    await obterAuth()
+      .api.signOut({ headers: await headers() })
+      .catch(() => undefined);
+    if (contexto) {
+      await prisma.sessao.deleteMany({ where: { id: contexto.sessaoId } });
+      await registrarAuditoria(prisma, {
+        acao: "auth.sair",
+        resultado: "SUCESSO",
+        ator: { contaId: contexto.ator.contaId, nome: contexto.ator.nome },
+      });
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false };
+  }
+}
+
 export async function sair() {
   const contexto = await obterSessao();
   try {

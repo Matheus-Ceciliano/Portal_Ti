@@ -12,7 +12,7 @@ export type Indicador = {
 /** Faixa de indicadores: uma superfície dividida, não uma grade de cartões iguais. */
 export function FaixaIndicadores({ itens }: { itens: Indicador[] }) {
   return (
-    <dl className="grid grid-cols-2 overflow-hidden rounded-lg border bg-card shadow-nivel-1 sm:grid-cols-3 lg:grid-cols-5">
+    <dl className="grid grid-cols-2 overflow-hidden rounded-2xl border bg-card shadow-nivel-1 sm:grid-cols-3 lg:grid-cols-5">
       {itens.map((i, n) => (
         <div
           key={i.rotulo}

@@ -1,18 +1,14 @@
-import { BookOpenText, FileText, Headset, Laptop, Monitor, MousePointer2, Smartphone, Headphones, type LucideIcon } from "lucide-react";
+import { BookOpenText, FileText, Headset, Laptop } from "lucide-react";
 import { EstadoVazio, formatarData, formatarDataHora } from "@/components/comum/pagina";
 import { Estado } from "@/components/comum/status-badge";
-import type { AtivoFicticio, ChamadoFicticio, TermoFicticio, TutorialFicticio } from "@/server/dados-ficticios/operacao";
+import { ICONE_CATEGORIA } from "@/components/inventario/visual";
+import type { ChamadoFicticio, TutorialFicticio } from "@/server/dados-ficticios/operacao";
+import type { MeuEquipamento } from "@/server/modulos/consultas";
+import type { listarMeusDocumentos } from "@/server/modulos/termos";
 
-const ICONE_TIPO: Record<AtivoFicticio["tipo"], LucideIcon> = {
-  Notebook: Laptop,
-  Desktop: Monitor,
-  Monitor: Monitor,
-  Celular: Smartphone,
-  Headset: Headphones,
-  "Kit teclado e mouse": MousePointer2,
-};
+type MeuDocumento = Awaited<ReturnType<typeof listarMeusDocumentos>>[number];
 
-export function ListaEquipamentos({ itens }: { itens: AtivoFicticio[] }) {
+export function ListaEquipamentos({ itens }: { itens: MeuEquipamento[] }) {
   if (itens.length === 0) {
     return (
       <EstadoVazio
@@ -25,20 +21,23 @@ export function ListaEquipamentos({ itens }: { itens: AtivoFicticio[] }) {
   return (
     <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
       {itens.map((a) => {
-        const Icone = ICONE_TIPO[a.tipo];
+        const Icone = ICONE_CATEGORIA[a.categoria];
         return (
-          <li key={a.id} className="flex gap-3 rounded-lg border bg-card p-4 shadow-nivel-1">
+          <li key={a.id} className="flex gap-3 rounded-2xl border bg-card p-4 shadow-nivel-1">
             <span className="grid size-10 shrink-0 place-items-center rounded-md bg-accent text-accent-foreground" aria-hidden>
               <Icone className="size-5" strokeWidth={1.75} />
             </span>
             <div className="min-w-0 flex-1">
               <p className="font-semibold text-titulo">{a.modelo}</p>
               <p className="tabular text-sm text-muted-foreground">
-                {a.tipo} · patrimônio {a.patrimonio}
+                {a.tipo}
+                {a.patrimonio ? ` · patrimônio ${a.patrimonio}` : a.nome ? ` · ${a.nome}` : ""}
               </p>
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <Estado grupo="ativo" valor={a.situacao} />
-                <span className="text-[13px] text-muted-foreground">desde {formatarData(a.desde)}</span>
+                <span className="text-[13px] text-muted-foreground">
+                  {a.situacao === "ALOCADO" ? "desde" : "entrega prevista para"} {formatarData(a.desde)}
+                </span>
               </div>
             </div>
           </li>
@@ -59,7 +58,7 @@ export function ListaChamados({ itens }: { itens: (ChamadoFicticio & { responsav
     );
   }
   return (
-    <ul className="divide-y rounded-lg border bg-card shadow-nivel-1">
+    <ul className="divide-y rounded-2xl border bg-card shadow-nivel-1">
       {itens.map((c) => (
         <li key={c.id} className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
           <div className="min-w-0">
@@ -78,7 +77,7 @@ export function ListaChamados({ itens }: { itens: (ChamadoFicticio & { responsav
   );
 }
 
-export function ListaDocumentos({ itens }: { itens: TermoFicticio[] }) {
+export function ListaDocumentos({ itens }: { itens: MeuDocumento[] }) {
   if (itens.length === 0) {
     return (
       <EstadoVazio
@@ -89,7 +88,7 @@ export function ListaDocumentos({ itens }: { itens: TermoFicticio[] }) {
     );
   }
   return (
-    <ul className="divide-y rounded-lg border bg-card shadow-nivel-1">
+    <ul className="divide-y rounded-2xl border bg-card shadow-nivel-1">
       {itens.map((t) => (
         <li key={t.id} className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
           <div className="flex min-w-0 items-start gap-3">
@@ -99,8 +98,13 @@ export function ListaDocumentos({ itens }: { itens: TermoFicticio[] }) {
                 {t.tipo === "TER" ? "Termo de entrega" : "Termo de devolução"} {t.numero}
               </p>
               <p className="tabular text-[13px] text-muted-foreground">
-                Emitido em {formatarData(t.emitidoEm)} · {t.ativos.join(", ")}
+                {t.emitidoEm ? `Emitido em ${formatarData(t.emitidoEm)}` : "Recebido assinado"} · {t.equipamentos.join(", ")}
               </p>
+              {t.temPdf ? (
+                <a href={`/api/termos/${t.id}/pdf`} target="_blank" rel="noopener" className="text-[13px] font-semibold text-link underline-offset-4 hover:underline">
+                  Abrir PDF assinado
+                </a>
+              ) : null}
             </div>
           </div>
           <span className="self-start sm:self-center">
@@ -116,7 +120,7 @@ export function ListaTutoriais({ itens }: { itens: TutorialFicticio[] }) {
   return (
     <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
       {itens.map((t) => (
-        <li key={t.id} className="flex flex-col gap-1 rounded-lg border bg-card p-4 shadow-nivel-1">
+        <li key={t.id} className="flex flex-col gap-1 rounded-2xl border bg-card p-4 shadow-nivel-1">
           <span className="flex items-center gap-1.5 text-[13px] text-muted-foreground">
             <BookOpenText className="size-4" aria-hidden /> {t.categoria}
           </span>

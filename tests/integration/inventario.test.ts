@@ -1,0 +1,479 @@
+/**
+ * Inventário e alocações no banco: cadastro atômico com carregador, unicidade, fotos privadas,
+ * carregadores C1/C2/C3, alocações (entrega, reserva, concorrência), devolução parcial,
+ * manutenção com recolhimento físico obrigatório, TER independente da entrega, RBAC e histórico.
+ */
+import { randomUUID } from "node:crypto";
+import { beforeEach, describe, expect, it } from "vitest";
+import { obterArmazenamento } from "@/server/armazenamento";
+import { carregarAtor, type Ator } from "@/server/authz/ator";
+import { ErroAutorizacao, ErroNegocio } from "@/server/authz/exigir";
+import { prisma } from "@/server/db";
+import { cancelarReserva, confirmarEntrega, criarAlocacao, obterAlocacao, registrarDevolucao } from "@/server/modulos/alocacoes";
+import {
+  adicionarCarregador,
+  cadastrarEquipamento,
+  desvincularCarregador,
+  editarEquipamento,
+  lerFotoEquipamento,
+  liberarAposAvaliacao,
+  listarInventario,
+  obterEquipamento,
+  type DadosEquipamento,
+} from "@/server/modulos/inventario";
+import { concluirManutencao, enviarParaManutencao, listarManutencoes } from "@/server/modulos/manutencoes";
+import { lerPdfTermo, registrarTerAssinado } from "@/server/modulos/termos";
+import { criarEmpresa, criarPessoa, limparBanco } from "../apoio/fabricas";
+
+async function ator(contaId: string): Promise<Ator> {
+  const a = await carregarAtor(prisma, contaId, { mfaVerificado: true });
+  if (!a) throw new Error("ator inexistente");
+  return a;
+}
+
+/** PNG 1×1 e PDF mínimos válidos (assinaturas de conteúdo reais). */
+const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
+const PDF = Buffer.from("%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n", "latin1");
+
+async function cenario() {
+  const empresa = await criarEmpresa();
+  const outra = await criarEmpresa();
+  const supervisor = await ator((await criarPessoa({ perfis: ["SUPERVISOR_TI"], ativada: true })).contaId);
+  const pessoa = await criarPessoa({ ativada: true });
+  return { empresa, outra, supervisor, pessoa };
+}
+
+let serie = 0;
+const notebook = (empresaId: string, n = 5001, extra: Partial<DadosEquipamento> = {}): DadosEquipamento => ({
+  categoria: "NOTEBOOK",
+  nomeDispositivo: `NBI${n}`,
+  patrimonio: `VLR-9${n}`,
+  empresaId,
+  marca: "Dell",
+  modelo: "Latitude 5440",
+  numeroSerie: `SIM-T${n}-${++serie}`,
+  processador: "Intel Core i5",
+  memoriaRam: "16 GB",
+  ...extra,
+});
+const monitor = (empresaId: string, n = 7001): DadosEquipamento => ({ categoria: "MONITOR", patrimonio: `VLR-9${n}`, empresaId, marca: "LG", modelo: "24MP400", numeroSerie: `SIM-M${n}-${++serie}` });
+
+async function carregadoresDe(notebookId: string) {
+  return prisma.ativo.findMany({ where: { notebookId }, orderBy: { sequenciaCarregador: "asc" } });
+}
+
+async function apagarArquivos(ativoIds: string[]) {
+  const fotos = await prisma.fotoAtivo.findMany({ where: { ativoId: { in: ativoIds } }, select: { chave: true } });
+  await Promise.all(fotos.map((f) => obterArmazenamento().remover(f.chave)));
+}
+
+beforeEach(limparBanco);
+
+describe("cadastro de equipamentos", () => {
+  it("notebook nasce com o carregador principal C1 na mesma transação, com histórico e auditoria", async () => {
+    const { empresa, supervisor } = await cenario();
+    const r = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id), chaveRequisicao: randomUUID() });
+    const [c1] = await carregadoresDe(r.id);
+    expect(c1).toMatchObject({ categoria: "CARREGADOR", nomeDispositivo: "NBI5001C1", sequenciaCarregador: 1, situacao: "DISPONIVEL", empresaId: empresa.id, patrimonio: null });
+    const ficha = await obterEquipamento(supervisor, r.id);
+    expect(ficha).toMatchObject({ nome: "NBI5001", patrimonio: "VLR-95001", situacao: "DISPONIVEL", responsavel: null, ter: null });
+    expect(ficha.carregadores.map((c) => c.nome)).toEqual(["NBI5001C1"]);
+    expect(ficha.movimentacoes.map((m) => m.tipo).sort()).toEqual(["CADASTRO", "CARREGADOR_VINCULADO"]);
+    expect(await prisma.eventoAuditoria.count({ where: { acao: "ativo.criar", alvoId: r.id, resultado: "SUCESSO" } })).toBe(1);
+
+    // Outras categorias não ganham carregador.
+    const m = await cadastrarEquipamento(supervisor, { dados: monitor(empresa.id) });
+    expect(await carregadoresDe(m.id)).toEqual([]);
+  });
+
+  it("repetir o mesmo envio (inclusive simultâneo) não duplica equipamento nem carregador", async () => {
+    const { empresa, supervisor } = await cenario();
+    const chave = randomUUID();
+    const r1 = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id), chaveRequisicao: chave });
+    const r2 = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id), chaveRequisicao: chave });
+    expect(r2).toEqual({ id: r1.id, repetido: true });
+
+    const outra = randomUUID();
+    const simultaneos = await Promise.all([1, 2, 3].map(() => cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5002), chaveRequisicao: outra })));
+    expect(new Set(simultaneos.map((s) => s.id)).size).toBe(1);
+    expect(await prisma.ativo.count({ where: { nomeDispositivo: { startsWith: "NBI5002" } } })).toBe(2); // notebook + C1
+  });
+
+  it("patrimônio, nome do dispositivo e número de série são únicos (sem diferenciar maiúsculas)", async () => {
+    const { empresa, supervisor } = await cenario();
+    await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5001, { numeroSerie: "SIM-UNICA" }) });
+    await expect(cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5003, { patrimonio: "vlr-95001" }) })).rejects.toThrow(/patrimônio já está cadastrado/);
+    await expect(cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5003, { nomeDispositivo: "nbi5001" }) })).rejects.toThrow(/nome de dispositivo já está cadastrado/);
+    await expect(cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5003, { numeroSerie: "sim-unica" }) })).rejects.toThrow(/número de série já está cadastrado/);
+    // O nome de um carregador também é único: um notebook não pode se chamar NBI5001C1.
+    await expect(cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5003, { nomeDispositivo: "NBI5001C1" }) })).rejects.toThrow(/nome de dispositivo/);
+    expect(await prisma.ativo.count({ where: { categoria: "NOTEBOOK" } })).toBe(1);
+  });
+
+  it("valida o cadastro no servidor: notebook exige nome; carregador não é avulso; empresa inativa e datas", async () => {
+    const { empresa, supervisor } = await cenario();
+    await expect(cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5001, { nomeDispositivo: "" }) })).rejects.toThrow(/nome do dispositivo/);
+    await expect(cadastrarEquipamento(supervisor, { dados: { ...notebook(empresa.id), categoria: "CARREGADOR" } })).rejects.toThrow(/categoria/);
+    await expect(cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5001, { nomeDispositivo: "NB 5001" }) })).rejects.toThrow(/letras sem acento/);
+    await expect(cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5001, { dataAquisicao: "2026-05-01", garantiaAte: "2025-01-01" }) })).rejects.toThrow(/Garantia/);
+    await prisma.empresa.update({ where: { id: empresa.id }, data: { ativa: false } });
+    await expect(cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) })).rejects.toThrow(/inativa/);
+    expect(await prisma.ativo.count()).toBe(0);
+  });
+
+  it("fotos: arquivos privados validados pelo conteúdo; o banco guarda só a chave; leitura com permissão", async () => {
+    const { empresa, supervisor, pessoa } = await cenario();
+    const r = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id), fotos: [{ tipo: "FRONTAL", dados: PNG }, { tipo: "ETIQUETA_SERIE", dados: PNG }] });
+    try {
+      const fotos = await prisma.fotoAtivo.findMany({ where: { ativoId: r.id } });
+      expect(fotos.map((f) => f.tipo).sort()).toEqual(["ETIQUETA_SERIE", "FRONTAL"]);
+      expect(fotos.every((f) => /^equipamentos\/[0-9a-f-]{36}\.png$/.test(f.chave) && f.mime === "image/png" && f.contexto === "CADASTRO")).toBe(true);
+      expect((await lerFotoEquipamento(supervisor, fotos[0].id))?.dados.equals(PNG)).toBe(true);
+      // Quem não está com o equipamento não vê a foto.
+      await expect(lerFotoEquipamento(await ator(pessoa.contaId), fotos[0].id)).rejects.toBeInstanceOf(ErroAutorizacao);
+      expect((await obterEquipamento(supervisor, r.id)).fotos).toHaveLength(2);
+    } finally {
+      await apagarArquivos([r.id]);
+    }
+    await expect(cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5004), fotos: [{ tipo: "TELA", dados: Buffer.from("não é imagem") }] })).rejects.toThrow(/JPG, PNG ou WebP/);
+    await expect(
+      cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5004), fotos: Array.from({ length: 13 }, () => ({ tipo: "OUTRA", dados: PNG })) }),
+    ).rejects.toThrow(/no máximo 12/);
+    await expect(cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5004), fotos: [{ tipo: "SELFIE", dados: PNG }] })).rejects.toThrow(/Tipo de foto/);
+    expect(await prisma.ativo.count({ where: { nomeDispositivo: "NBI5004" } })).toBe(0);
+  });
+
+  it("edição: renomear o notebook renomeia os carregadores; a empresa proprietária não muda pela edição", async () => {
+    const { empresa, outra, supervisor } = await cenario();
+    const r = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
+    await adicionarCarregador(supervisor, { notebookId: r.id });
+    await editarEquipamento(supervisor, { id: r.id, dados: notebook(empresa.id, 5001, { nomeDispositivo: "NBI6001", numeroSerie: undefined }) });
+    expect((await carregadoresDe(r.id)).map((c) => [c.nomeDispositivo, c.empresaId])).toEqual([
+      ["NBI6001C1", empresa.id],
+      ["NBI6001C2", empresa.id],
+    ]);
+    // Mudar a empresa só pela transferência entre empresas (bloqueio no servidor, não só na tela).
+    await expect(editarEquipamento(supervisor, { id: r.id, dados: notebook(outra.id, 5001, { nomeDispositivo: "NBI6001" }) })).rejects.toThrow(/transferência entre empresas/);
+    expect((await prisma.ativo.findUniqueOrThrow({ where: { id: r.id } })).empresaId).toBe(empresa.id);
+    expect(await prisma.movimentacaoAtivo.count({ where: { ativoId: r.id, tipo: "TRANSFERENCIA_EMPRESA" } })).toBe(0);
+  });
+});
+
+describe("carregadores", () => {
+  it("C2 e C3 seguem a sequência; adições simultâneas não repetem posição", async () => {
+    const { empresa, supervisor } = await cenario();
+    const r = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
+    expect((await adicionarCarregador(supervisor, { notebookId: r.id })).nome).toBe("NBI5001C2");
+    const simultaneos = await Promise.all([1, 2, 3].map(() => adicionarCarregador(supervisor, { notebookId: r.id })));
+    expect(simultaneos.map((s) => s.nome).sort()).toEqual(["NBI5001C3", "NBI5001C4", "NBI5001C5"]);
+    expect((await carregadoresDe(r.id)).map((c) => c.sequenciaCarregador)).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it("perda: carregador baixado, vínculo encerrado e substituto na mesma alocação; o último não sai sem substituto", async () => {
+    const { empresa, supervisor, pessoa } = await cenario();
+    const r = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
+    const [c1] = await carregadoresDe(r.id);
+    const a = await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [r.id, c1.id], modo: "ENTREGAR" });
+
+    await expect(desvincularCarregador(supervisor, { carregadorId: c1.id, motivo: "PERDA", observacao: "Esquecido na obra", substituir: false })).rejects.toThrow(/sem carregador vinculado/);
+    const { substituto } = await desvincularCarregador(supervisor, { carregadorId: c1.id, motivo: "PERDA", observacao: "Esquecido na obra", substituir: true });
+    expect(substituto?.nome).toBe("NBI5001C2");
+
+    const [antigo, novo] = await carregadoresDe(r.id);
+    expect(antigo).toMatchObject({ situacao: "BAIXADO", motivoDesvinculo: "PERDA" });
+    expect(antigo.desvinculadoEm).not.toBeNull();
+    expect(novo).toMatchObject({ situacao: "ALOCADO", desvinculadoEm: null });
+    const detalhe = await obterAlocacao(supervisor, a.id);
+    expect(detalhe.estado).toBe("ATIVA");
+    expect(detalhe.itens.map((i) => [i.ativo.nome, i.aberto, i.motivoEncerramento])).toEqual(
+      expect.arrayContaining([
+        ["NBI5001C1", false, "SUBSTITUICAO"],
+        ["NBI5001C2", true, null],
+        ["NBI5001", true, null],
+      ]),
+    );
+  });
+
+  it("troca ou defeito vai para avaliação (nunca direto para disponível)", async () => {
+    const { empresa, supervisor } = await cenario();
+    const r = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
+    const { id: c2 } = await adicionarCarregador(supervisor, { notebookId: r.id });
+    await desvincularCarregador(supervisor, { carregadorId: c2, motivo: "DEFEITO", observacao: "Não carrega", substituir: false });
+    const depois = await prisma.ativo.findUniqueOrThrow({ where: { id: c2 } });
+    expect(depois).toMatchObject({ situacao: "DEVOLVIDO_EM_AVALIACAO", motivoDesvinculo: "DEFEITO" });
+    await expect(liberarAposAvaliacao(supervisor, { ativoId: c2, observacao: "ok" })).rejects.toThrow(/desvinculado/);
+    await expect(desvincularCarregador(supervisor, { carregadorId: c2, motivo: "TROCA", observacao: "x", substituir: false })).rejects.toThrow(/já foi desvinculado/);
+  });
+});
+
+describe("alocações", () => {
+  it("entrega de vários equipamentos: custódia na entrega física, empresas preservadas, sem TER automático", async () => {
+    const { empresa, outra, supervisor, pessoa } = await cenario();
+    const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
+    const mon = await cadastrarEquipamento(supervisor, { dados: monitor(outra.id) });
+    const [c1] = await carregadoresDe(nb.id);
+    const a = await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id, c1.id, mon.id], modo: "ENTREGAR", observacoes: "Kit de admissão" });
+    expect(a.numero).toMatch(/^ALO-\d{4}-0001$/);
+
+    const d = await obterAlocacao(supervisor, a.id);
+    expect(d).toMatchObject({ estado: "ATIVA", empresaColaborador: { id: pessoa.empresaId }, termos: [] });
+    expect(d.entregueEm).not.toBeNull();
+    expect(Object.fromEntries(d.itens.map((i) => [i.ativo.nome ?? i.ativo.patrimonio, i.empresaProprietaria.id]))).toEqual({
+      NBI5001: empresa.id,
+      NBI5001C1: empresa.id,
+      "VLR-97001": outra.id,
+    });
+    // A propriedade do patrimônio não muda com a entrega a colaborador de outra empresa.
+    expect((await prisma.ativo.findUniqueOrThrow({ where: { id: mon.id } })).empresaId).toBe(outra.id);
+    const ficha = await obterEquipamento(supervisor, nb.id);
+    expect(ficha).toMatchObject({ situacao: "ALOCADO", responsavel: { id: pessoa.colaboradorId, alocacao: a.numero }, reserva: null, ter: null });
+    const evento = await prisma.eventoAuditoria.findFirstOrThrow({ where: { acao: "alocacao.confirmar_entrega", alvoId: a.id } });
+    expect(evento.detalhe).toMatchObject({ modo: "ENTREGAR", equipamentos: 3, equipamentosDeOutraEmpresa: 3 });
+  });
+
+  it("reserva não torna ninguém responsável; a confirmação da entrega muda a custódia; cancelar devolve ao estoque", async () => {
+    const { empresa, supervisor, pessoa } = await cenario();
+    const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
+    const amanha = new Date(Date.now() + 2 * 86_400_000).toISOString().slice(0, 10);
+    const reserva = await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id], modo: "RESERVAR", data: amanha });
+    let ficha = await obterEquipamento(supervisor, nb.id);
+    expect(ficha).toMatchObject({ situacao: "RESERVADO", responsavel: null, reserva: { id: pessoa.colaboradorId, previstaPara: amanha } });
+    await expect(registrarDevolucao(supervisor, { alocacaoId: reserva.id, itens: [] })).rejects.toThrow();
+    await confirmarEntrega(supervisor, { alocacaoId: reserva.id });
+    ficha = await obterEquipamento(supervisor, nb.id);
+    expect(ficha).toMatchObject({ situacao: "ALOCADO", responsavel: { id: pessoa.colaboradorId }, reserva: null });
+    await expect(confirmarEntrega(supervisor, { alocacaoId: reserva.id })).rejects.toThrow(/Só uma reserva/);
+    await expect(cancelarReserva(supervisor, { alocacaoId: reserva.id, motivo: "Desistência" })).rejects.toThrow(/registre a devolução/);
+
+    const m = await cadastrarEquipamento(supervisor, { dados: monitor(empresa.id) });
+    const outra = await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [m.id], modo: "RESERVAR" });
+    await expect(cancelarReserva(supervisor, { alocacaoId: outra.id, motivo: " " })).rejects.toThrow(/motivo/);
+    await cancelarReserva(supervisor, { alocacaoId: outra.id, motivo: "Colaborador não iniciou" });
+    expect((await prisma.ativo.findUniqueOrThrow({ where: { id: m.id } })).situacao).toBe("DISPONIVEL");
+    expect((await prisma.alocacao.findUniqueOrThrow({ where: { id: outra.id } })).estado).toBe("CANCELADA");
+    await expect(criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [m.id], modo: "RESERVAR", data: "2020-01-01" })).rejects.toThrow(/passado/);
+  });
+
+  it("um patrimônio não tem duas alocações abertas, nem com pedidos simultâneos", async () => {
+    const { empresa, supervisor, pessoa } = await cenario();
+    const outraPessoa = await criarPessoa({ ativada: true });
+    const nb = await cadastrarEquipamento(supervisor, { dados: monitor(empresa.id) });
+    const resultados = await Promise.allSettled(
+      [pessoa, outraPessoa, pessoa].map((p) => criarAlocacao(supervisor, { colaboradorId: p.colaboradorId, ativoIds: [nb.id], modo: "ENTREGAR" })),
+    );
+    expect(resultados.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    for (const r of resultados.filter((x): x is PromiseRejectedResult => x.status === "rejected")) expect(r.reason).toBeInstanceOf(ErroNegocio);
+    expect(await prisma.itemAlocacao.count({ where: { ativoId: nb.id, aberto: true } })).toBe(1);
+    // A última barreira é o banco: um segundo item aberto do mesmo equipamento é recusado.
+    const aberta = await prisma.alocacao.findFirstOrThrow({ where: { estado: "ATIVA" } });
+    await expect(prisma.itemAlocacao.create({ data: { alocacaoId: aberta.id, ativoId: nb.id, empresaProprietariaId: empresa.id } })).rejects.toThrow();
+  });
+
+  it("envio duplicado devolve a mesma alocação; equipamento em manutenção não é alocado", async () => {
+    const { empresa, supervisor, pessoa } = await cenario();
+    const a1 = await cadastrarEquipamento(supervisor, { dados: monitor(empresa.id, 7001) });
+    const a2 = await cadastrarEquipamento(supervisor, { dados: monitor(empresa.id, 7002) });
+    const chave = randomUUID();
+    const pedidos = await Promise.all([1, 2].map(() => criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [a1.id], modo: "ENTREGAR", chaveRequisicao: chave })));
+    expect(new Set(pedidos.map((p) => p.id)).size).toBe(1);
+    expect(await prisma.alocacao.count()).toBe(1);
+
+    await enviarParaManutencao(supervisor, { ativoId: a2.id, motivo: "Tela com manchas", observacoes: "Faixas na lateral" });
+    await expect(criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [a2.id], modo: "ENTREGAR" })).rejects.toThrow(/em manutenção e não pode ser alocado/);
+    await expect(criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [a2.id], modo: "RESERVAR" })).rejects.toThrow(/em manutenção/);
+  });
+});
+
+describe("devolução", () => {
+  it("parcial encerra só os itens devolvidos; a alocação segue ativa até o último item", async () => {
+    const { empresa, supervisor, pessoa } = await cenario();
+    const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
+    const mon = await cadastrarEquipamento(supervisor, { dados: monitor(empresa.id) });
+    const [c1] = await carregadoresDe(nb.id);
+    const a = await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id, c1.id, mon.id], modo: "ENTREGAR" });
+    const itens = Object.fromEntries((await obterAlocacao(supervisor, a.id)).itens.map((i) => [i.ativo.id, i.id]));
+
+    const parcial = await registrarDevolucao(supervisor, {
+      alocacaoId: a.id,
+      itens: [{ itemId: itens[mon.id], estadoFisico: "BOM", destino: "AVALIACAO", fotos: [{ tipo: "OUTRA", dados: PNG }] }],
+    });
+    try {
+      expect(parcial.numero).toMatch(/^DEV-\d{4}-0001$/);
+      let d = await obterAlocacao(supervisor, a.id);
+      expect(d.estado).toBe("ATIVA");
+      expect(d.devolucoes[0]).toMatchObject({ abrangencia: "PARCIAL", itens: 1 });
+      expect((await prisma.ativo.findUniqueOrThrow({ where: { id: mon.id } })).situacao).toBe("DEVOLVIDO_EM_AVALIACAO");
+      expect((await obterEquipamento(supervisor, nb.id)).responsavel?.id).toBe(pessoa.colaboradorId);
+      expect(await prisma.fotoAtivo.count({ where: { ativoId: mon.id, contexto: "DEVOLUCAO", itemDevolucaoId: { not: null } } })).toBe(1);
+
+      await expect(
+        registrarDevolucao(supervisor, { alocacaoId: a.id, itens: [{ itemId: itens[nb.id], estadoFisico: "DANIFICADO", destino: "MANUTENCAO" }] }),
+      ).rejects.toThrow(/Descreva o problema/);
+      await expect(registrarDevolucao(supervisor, { alocacaoId: a.id, itens: [{ itemId: itens[mon.id], estadoFisico: "BOM", destino: "AVALIACAO" }] })).rejects.toThrow(/já foi devolvido/);
+
+      await registrarDevolucao(supervisor, {
+        alocacaoId: a.id,
+        itens: [
+          { itemId: itens[nb.id], estadoFisico: "DANIFICADO", destino: "MANUTENCAO", observacoes: "Tela trincada" },
+          { itemId: itens[c1.id], estadoFisico: "BOM", destino: "AVALIACAO" },
+        ],
+      });
+      d = await obterAlocacao(supervisor, a.id);
+      expect(d.estado).toBe("ENCERRADA");
+      expect(d.itens).toHaveLength(3); // nada é apagado
+      expect(d.itens.every((i) => !i.aberto && i.motivoEncerramento === "DEVOLUCAO")).toBe(true);
+      const manutencao = await prisma.manutencao.findFirstOrThrow({ where: { ativoId: nb.id } });
+      expect(manutencao).toMatchObject({ aberta: true, observacoes: "Tela trincada", recolhidoDeId: pessoa.colaboradorId });
+      expect((await prisma.ativo.findUniqueOrThrow({ where: { id: nb.id } })).situacao).toBe("MANUTENCAO");
+      // Depois da avaliação, o monitor volta ao estoque.
+      await liberarAposAvaliacao(supervisor, { ativoId: mon.id, observacao: "Testado, sem avarias" });
+      expect((await prisma.ativo.findUniqueOrThrow({ where: { id: mon.id } })).situacao).toBe("DISPONIVEL");
+    } finally {
+      await apagarArquivos([mon.id]);
+    }
+  });
+});
+
+describe("manutenção", () => {
+  it("sem alocação: registra e a conclusão devolve ao estoque sem criar alocação", async () => {
+    const { empresa, supervisor } = await cenario();
+    const m = await cadastrarEquipamento(supervisor, { dados: monitor(empresa.id) });
+    await expect(enviarParaManutencao(supervisor, { ativoId: m.id, motivo: "", observacoes: "x" })).rejects.toThrow(/motivo/);
+    await expect(enviarParaManutencao(supervisor, { ativoId: m.id, motivo: "Sem imagem", observacoes: " " })).rejects.toThrow(/observações/);
+    const r = await enviarParaManutencao(supervisor, { ativoId: m.id, motivo: "Sem imagem", observacoes: "Não liga" });
+    expect(r.alocacaoEncerrada).toBeNull();
+    await expect(enviarParaManutencao(supervisor, { ativoId: m.id, motivo: "De novo", observacoes: "x" })).rejects.toThrow(/já está em manutenção/);
+    expect((await listarManutencoes(supervisor)).linhas.map((l) => l.ativo.id)).toEqual([m.id]);
+
+    await expect(concluirManutencao(supervisor, { manutencaoId: r.id, resultado: "REPARADO", servicoRealizado: "" })).rejects.toThrow(/serviço realizado/);
+    await concluirManutencao(supervisor, { manutencaoId: r.id, resultado: "REPARADO", servicoRealizado: "Cabo substituído" });
+    expect((await prisma.ativo.findUniqueOrThrow({ where: { id: m.id } })).situacao).toBe("DISPONIVEL");
+    expect(await prisma.alocacao.count()).toBe(0);
+    await expect(concluirManutencao(supervisor, { manutencaoId: r.id, resultado: "REPARADO", servicoRealizado: "x" })).rejects.toThrow(/já foi concluída/);
+    expect((await listarManutencoes(supervisor, { situacao: "CONCLUIDA" })).linhas[0]).toMatchObject({ resultado: "REPARADO", servicoRealizado: "Cabo substituído" });
+  });
+
+  it("com alocação ativa: sem confirmação do recolhimento nada muda; confirmado, encerra o item e preserva o TER", async () => {
+    const { empresa, supervisor, pessoa } = await cenario();
+    const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
+    const [c1] = await carregadoresDe(nb.id);
+    const a = await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id, c1.id], modo: "ENTREGAR" });
+    await registrarTerAssinado(supervisor, { alocacaoId: a.id, pdf: PDF });
+
+    await expect(enviarParaManutencao(supervisor, { ativoId: nb.id, motivo: "Teclado falhando", observacoes: "Teclas sem resposta" })).rejects.toThrow(/Confirme o recolhimento físico/);
+    expect((await prisma.ativo.findUniqueOrThrow({ where: { id: nb.id } })).situacao).toBe("ALOCADO");
+    expect(await prisma.manutencao.count()).toBe(0);
+
+    const r = await enviarParaManutencao(supervisor, { ativoId: nb.id, motivo: "Teclado falhando", observacoes: "Teclas sem resposta", confirmarRecolhimento: true });
+    expect(r.alocacaoEncerrada).toBe(a.numero);
+    const d = await obterAlocacao(supervisor, a.id);
+    expect(d.itens.find((i) => i.ativo.id === nb.id)).toMatchObject({ aberto: false, motivoEncerramento: "MANUTENCAO" });
+    expect(d.estado).toBe("ATIVA"); // o carregador continua com a pessoa
+    expect(d.termos[0]).toMatchObject({ estado: "ASSINADO", temPdf: true }); // TER não muda
+    const m = await prisma.manutencao.findUniqueOrThrow({ where: { id: r.id } });
+    expect(m).toMatchObject({ recolhidoDeId: pessoa.colaboradorId, abertaPorNome: supervisor.nome });
+    expect(m.recolhimentoConfirmadoEm).not.toBeNull();
+    const mov = await prisma.movimentacaoAtivo.findFirstOrThrow({ where: { ativoId: nb.id, tipo: "ENVIO_MANUTENCAO" } });
+    expect(mov).toMatchObject({ colaboradorId: pessoa.colaboradorId, situacaoAnterior: "ALOCADO", situacaoNova: "MANUTENCAO", realizadoPorNome: supervisor.nome });
+    expect(mov.observacao).toContain("Teclado falhando");
+    // Reservado não vai para manutenção sem cancelar a reserva.
+    const mon = await cadastrarEquipamento(supervisor, { dados: monitor(empresa.id) });
+    await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [mon.id], modo: "RESERVAR" });
+    await expect(enviarParaManutencao(supervisor, { ativoId: mon.id, motivo: "x", observacoes: "y" })).rejects.toThrow(/cancele a reserva/);
+    await concluirManutencao(supervisor, { manutencaoId: r.id, resultado: "SEM_REPARO", servicoRealizado: "Placa danificada" });
+    expect((await prisma.ativo.findUniqueOrThrow({ where: { id: nb.id } })).situacao).toBe("BAIXADO");
+  });
+});
+
+describe("TER e entrega", () => {
+  it("entrega independe do TER; só PDF válido marca assinado, sem alterar a alocação; o banco recusa assinado sem PDF", async () => {
+    const { empresa, supervisor, pessoa } = await cenario();
+    const m = await cadastrarEquipamento(supervisor, { dados: monitor(empresa.id) });
+    const a = await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [m.id], modo: "ENTREGAR" });
+    expect((await obterAlocacao(supervisor, a.id)).termos).toEqual([]); // entregue, sem TER
+    await expect(registrarTerAssinado(supervisor, { alocacaoId: a.id, pdf: Buffer.from("não é pdf") })).rejects.toThrow(/PDF/);
+    const r = await registrarTerAssinado(supervisor, { alocacaoId: a.id, pdf: PDF });
+    const termo = await prisma.termo.findFirstOrThrow({ where: { alocacaoId: a.id } });
+    try {
+      expect(termo).toMatchObject({ numero: r.numero, estado: "ASSINADO", tipo: "TER", colaboradorId: pessoa.colaboradorId });
+      expect(termo.sha256Assinado).toMatch(/^[0-9a-f]{64}$/);
+      expect((await lerPdfTermo(supervisor, termo.id))?.dados.equals(PDF)).toBe(true);
+      expect((await prisma.alocacao.findUniqueOrThrow({ where: { id: a.id } })).estado).toBe("ATIVA");
+      await expect(registrarTerAssinado(supervisor, { alocacaoId: a.id, pdf: PDF })).rejects.toThrow(/já tem TER assinado/);
+      // O colaborador só baixa termo disponibilizado pela TI.
+      await expect(lerPdfTermo(await ator(pessoa.contaId), termo.id)).rejects.toBeInstanceOf(ErroAutorizacao);
+    } finally {
+      await obterArmazenamento().remover(termo.arquivoAssinadoChave!);
+    }
+    await expect(prisma.termo.create({ data: { numero: "TER-TESTE-1", tipo: "TER", alocacaoId: a.id, colaboradorId: pessoa.colaboradorId, estado: "ASSINADO" } })).rejects.toThrow();
+
+    const mon = await cadastrarEquipamento(supervisor, { dados: monitor(empresa.id, 7002) });
+    const reserva = await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [mon.id], modo: "RESERVAR" });
+    await expect(registrarTerAssinado(supervisor, { alocacaoId: reserva.id, pdf: PDF })).rejects.toThrow(/depois da entrega física/);
+  });
+});
+
+describe("lista do inventário", () => {
+  it("sem custódia nem TER; indicadores ignoram o filtro de situação; rankings seguem os filtros; patrimônio pesquisável", async () => {
+    const { empresa, outra, supervisor, pessoa } = await cenario();
+    const entregue = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5001) });
+    await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5002) });
+    await cadastrarEquipamento(supervisor, { dados: notebook(outra.id, 5003, { marca: "Lenovo", modelo: "ThinkPad E14" }) });
+    const mon = await cadastrarEquipamento(supervisor, { dados: monitor(empresa.id) });
+    await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [entregue.id], modo: "ENTREGAR" });
+    await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [mon.id], modo: "RESERVAR" });
+
+    const tudo = await listarInventario(supervisor);
+    expect(tudo.total).toBe(4); // carregadores só com o filtro de tipo
+    expect(Object.keys(tudo.linhas[0]).sort()).toEqual(["categoria", "empresa", "id", "marca", "miniatura", "modelo", "nome", "patrimonio", "situacao"]);
+    expect(tudo.indicadores).toMatchObject({ total: 4, disponiveis: 2, alocados: 1, reservados: 1, manutencao: 0, baixados: 0 });
+    expect(tudo.indicadores.porTipo).toEqual([{ categoria: "NOTEBOOK", total: 3 }, { categoria: "MONITOR", total: 1 }]);
+
+    const disponiveis = await listarInventario(supervisor, { situacao: "DISPONIVEL" });
+    expect(disponiveis.total).toBe(2);
+    expect(disponiveis.indicadores).toMatchObject({ total: 4, disponiveis: 2, alocados: 1, reservados: 1 });
+    expect(disponiveis.indicadores.porTipo).toEqual([{ categoria: "NOTEBOOK", total: 2 }]);
+    expect(disponiveis.indicadores.porEmpresa.map((e) => [e.id, e.total]).sort()).toEqual([[empresa.id, 1], [outra.id, 1]].sort());
+    expect(disponiveis.indicadores.porMarca).toEqual(expect.arrayContaining([{ marca: "Dell", total: 1 }, { marca: "Lenovo", total: 1 }]));
+
+    const daEmpresa = await listarInventario(supervisor, { empresaId: empresa.id });
+    expect(daEmpresa.indicadores).toMatchObject({ total: 3, disponiveis: 1, alocados: 1, reservados: 1 });
+    expect(daEmpresa.indicadores.porEmpresa).toEqual([expect.objectContaining({ id: empresa.id, total: 3 })]);
+
+    expect((await listarInventario(supervisor, { busca: "vlr-95002" })).linhas.map((l) => l.nome)).toEqual(["NBI5002"]);
+    expect((await listarInventario(supervisor, { busca: "thinkpad" })).linhas.map((l) => l.nome)).toEqual(["NBI5003"]);
+    // Responsável não é critério de pesquisa do inventário (fica em Alocações).
+    const { nome } = await prisma.colaborador.findUniqueOrThrow({ where: { id: pessoa.colaboradorId }, select: { nome: true } });
+    expect((await listarInventario(supervisor, { busca: nome })).total).toBe(0);
+    expect((await listarInventario(supervisor, { categoria: "CARREGADOR" })).total).toBe(3);
+  });
+});
+
+describe("permissões e histórico", () => {
+  it("colaborador comum não cadastra, não aloca nem vê o inventário; vê só o equipamento que está com ele", async () => {
+    const { empresa, supervisor, pessoa } = await cenario();
+    const comum = await ator(pessoa.contaId);
+    await expect(cadastrarEquipamento(comum, { dados: notebook(empresa.id) })).rejects.toBeInstanceOf(ErroAutorizacao);
+    await expect(listarInventario(comum)).rejects.toBeInstanceOf(ErroAutorizacao);
+    const nb = await cadastrarEquipamento(supervisor, { dados: monitor(empresa.id) });
+    await expect(criarAlocacao(comum, { colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id], modo: "ENTREGAR" })).rejects.toBeInstanceOf(ErroAutorizacao);
+    await expect(enviarParaManutencao(comum, { ativoId: nb.id, motivo: "x", observacoes: "y" })).rejects.toBeInstanceOf(ErroAutorizacao);
+    await expect(obterEquipamento(comum, nb.id)).rejects.toBeInstanceOf(ErroAutorizacao);
+    await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id], modo: "ENTREGAR" });
+    expect((await obterEquipamento(comum, nb.id)).id).toBe(nb.id);
+    expect(await prisma.eventoAuditoria.count({ where: { resultado: "NEGADO", atorContaId: pessoa.contaId } })).toBeGreaterThanOrEqual(4);
+
+    // O Estagiário opera o inventário no dia a dia (PM §12).
+    const estagiario = await ator((await criarPessoa({ perfis: ["ESTAGIARIO_TI"], ativada: true })).contaId);
+    const r = await cadastrarEquipamento(estagiario, { dados: notebook(empresa.id, 5009) });
+    await criarAlocacao(estagiario, { colaboradorId: pessoa.colaboradorId, ativoIds: [r.id], modo: "ENTREGAR" });
+  });
+
+  it("o histórico de movimentações é somente inserção", async () => {
+    const { empresa, supervisor } = await cenario();
+    await cadastrarEquipamento(supervisor, { dados: monitor(empresa.id) });
+    await expect(prisma.movimentacaoAtivo.updateMany({ data: { observacao: "alterado" } })).rejects.toThrow();
+    await expect(prisma.movimentacaoAtivo.deleteMany()).rejects.toThrow();
+    expect(await prisma.movimentacaoAtivo.count()).toBe(1);
+  });
+});

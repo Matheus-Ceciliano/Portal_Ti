@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import { hash, verify } from "@node-rs/argon2";
+import { seguePadraoSenhaPlanilha } from "@/lib/identificadores";
 import { obterConfiguracao } from "@/server/config";
 
 /**
@@ -65,6 +66,10 @@ export function validarPoliticaSenha(senha: string, email?: string): string | nu
   const normalizada = senha.toLowerCase();
   if (SENHAS_PROIBIDAS.has(normalizada)) return "Essa senha é comum demais. Escolha outra.";
   if (/^(.)\1+$/.test(senha)) return "A senha não pode repetir um único caractere.";
+  // Padrão previsível da planilha legada (Empresa@código.código): nunca vale como credencial.
+  if (seguePadraoSenhaPlanilha(senha)) {
+    return "A senha não pode seguir o padrão da planilha (Empresa@número.número): ele é previsível. Gere uma senha aleatória.";
+  }
   const local = email?.split("@")[0]?.toLowerCase();
   if (local && local.length >= 4 && normalizada.includes(local)) {
     return "A senha não pode conter o seu e-mail.";

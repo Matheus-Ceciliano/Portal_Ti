@@ -15,7 +15,6 @@ import {
 } from "@/server/modulos/perfis";
 import {
   alterarBloqueioConta,
-  cadastrarPessoa,
   provisionarContaMicrosoft,
   redefinirSenhaPelaTi,
 } from "@/server/modulos/pessoas";
@@ -39,50 +38,6 @@ async function atorAtual() {
 function errosDeCampo(erro: z.ZodError): Record<string, string | undefined> {
   const campos = z.flattenError(erro).fieldErrors as Record<string, string[] | undefined>;
   return Object.fromEntries(Object.entries(campos).map(([k, v]) => [k, v?.[0]]));
-}
-
-/* Cadastro de pessoa com senha inicial */
-
-const esquemaCadastro = z.object({
-  nome: z.string().trim().min(3, "Informe o nome completo.").max(120),
-  email: z.string().trim().toLowerCase().pipe(z.email("Informe um e-mail corporativo válido.")),
-  cargo: z.string().trim().min(2, "Informe o cargo.").max(80),
-  departamento: z.string().trim().min(2, "Informe o departamento.").max(80),
-  empresaId: z.uuid("Selecione a empresa."),
-  senhaInicial: z.string().min(1, "Defina a senha inicial."),
-  criarContaMicrosoft: z.boolean(),
-});
-
-export async function acaoCadastrarPessoa(_a: EstadoAcao, formData: FormData): Promise<EstadoAcao> {
-  const ator = await atorAtual();
-  if (!ator) return SESSAO_EXPIRADA;
-  const dados = esquemaCadastro.safeParse({
-    nome: formData.get("nome"),
-    email: formData.get("email"),
-    cargo: formData.get("cargo"),
-    departamento: formData.get("departamento"),
-    empresaId: formData.get("empresaId"),
-    senhaInicial: formData.get("senhaInicial"),
-    criarContaMicrosoft: formData.get("criarContaMicrosoft") === "on",
-  });
-  if (!dados.success) return { erros: errosDeCampo(dados.error) };
-  try {
-    const resultado = await cadastrarPessoa(ator, dados.data);
-    revalidatePath("/ti/cadastros/pessoas");
-    const m365 = resultado.microsoft365;
-    return {
-      ok: true,
-      colaboradorId: resultado.colaboradorId,
-      mensagem: m365
-        ? `Pessoa cadastrada. ${m365.mensagem}`
-        : "Pessoa cadastrada. Entregue a senha inicial ao titular por um canal fora do portal; no primeiro acesso ele define a própria senha.",
-    };
-  } catch (erro) {
-    const mensagem = mensagemDeErro(erro);
-    return mensagem.startsWith("A senha") || mensagem.startsWith("Essa senha")
-      ? { erros: { senhaInicial: mensagem } }
-      : { erro: mensagem };
-  }
 }
 
 /* Perfis */

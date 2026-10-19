@@ -55,3 +55,4 @@ As planilhas da TI (`docs/SGSI/`, `docs/Inventário/`, `docs/dISTRIBUIÇÃO DE C
 1. A TI aprova por escrito as decisões de arquitetura revistas (DA-02, DA-03, DA-04, DA-08, DA-09 e DA-22) e as novas (DA-24 a DA-27), e responde às questões que bloqueiam a Etapa 1 (`docs/REVISAO_FINAL_FASE_01.md` §14).
 2. Concluir a Etapa 0: primeiro commit e repositório privado, Docker e projeto Supabase de homologação, todos com autorização (`docs/CHECKLIST_ETAPA_0.md`).
 3. Etapa 1 (fundação), somente após a aprovação A-01.
+# Portal_Ti

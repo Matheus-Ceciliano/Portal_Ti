@@ -2,7 +2,7 @@
 
 import { ChevronDown, LayoutDashboard, LogOut, Monitor, UserRound } from "lucide-react";
 import Link from "next/link";
-import { useTransition } from "react";
+import { useRef, useState, useTransition } from "react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -16,7 +16,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { acaoTrocarVisao } from "@/server/acoes/administracao";
-import { sair } from "@/server/acoes/autenticacao";
+import { DialogoSair } from "./dialogo-sair";
 
 export type DadosUsuario = {
   nome: string;
@@ -37,6 +37,8 @@ const iniciais = (nome: string) =>
 
 export function MenuUsuario({ usuario }: { usuario: DadosUsuario }) {
   const [pendente, iniciar] = useTransition();
+  const [confirmarSaida, setConfirmarSaida] = useState(false);
+  const refGatilho = useRef<HTMLButtonElement>(null);
 
   function trocarVisao(valor: string) {
     const dados = new FormData();
@@ -45,9 +47,10 @@ export function MenuUsuario({ usuario }: { usuario: DadosUsuario }) {
   }
 
   return (
+    <>
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" className="h-11 gap-2 px-2 lg:h-9" data-testid="menu-usuario" aria-label={`Menu de ${usuario.nome}`}>
+        <Button ref={refGatilho} variant="ghost" className="h-11 gap-2 px-2 lg:h-10" data-testid="menu-usuario" aria-label={`Menu de ${usuario.nome}`}>
           <span
             aria-hidden
             className="grid size-8 place-items-center rounded-full bg-accent text-xs font-semibold text-accent-foreground"
@@ -91,15 +94,13 @@ export function MenuUsuario({ usuario }: { usuario: DadosUsuario }) {
             </Link>
           </DropdownMenuItem>
         ) : null}
-        <DropdownMenuItem
-          onSelect={() => iniciar(() => sair())}
-          data-testid="sair"
-          className="text-destructive focus:text-destructive"
-        >
+        <DropdownMenuItem onSelect={() => setConfirmarSaida(true)} data-testid="sair" variant="destructive">
           <LogOut className="size-4" aria-hidden />
-          Sair
+          Sair da conta
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
+    <DialogoSair aberto={confirmarSaida} aoMudar={setConfirmarSaida} retornarFoco={refGatilho} />
+    </>
   );
 }

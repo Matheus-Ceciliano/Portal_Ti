@@ -61,21 +61,49 @@
   --color-neutro: var(--neutro);
   --color-neutro-fundo: var(--neutro-fundo);
   --color-faixa: var(--faixa);
+  --color-marca: var(--marca);
   --color-faixa-fundo: var(--faixa-fundo);
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
-  --radius-xl: 10px;
-  --radius-2xl: 12px;
-  --radius-3xl: 14px;
-  --radius-4xl: 16px;
-  --shadow-nivel-1: 0 1px 2px rgb(16 24 40 / 0.06);
-  --shadow-nivel-2: 0 8px 24px rgb(16 24 40 / 0.12);
+  /* Escala de raios (Etapa 1, redesign): cresce com o tamanho do elemento. */
+  --radius-sm: 6px; /* badges, itens de menu */
+  --radius-md: 8px; /* campos e botões pequenos */
+  --radius-lg: 10px; /* campos e botões */
+  --radius-xl: 12px; /* menus, blocos internos */
+  --radius-2xl: 16px; /* cartões e diálogos */
+  --radius-3xl: 20px;
+  --radius-4xl: 24px;
+  --shadow-nivel-1: 0 1px 2px rgb(16 24 40 / 0.05), 0 1px 3px rgb(16 24 40 / 0.04);
+  --shadow-nivel-2: 0 12px 32px -4px rgb(16 24 40 / 0.14), 0 4px 8px -2px rgb(16 24 40 / 0.06);
+  --shadow-botao: 0 1px 2px rgb(16 24 40 / 0.08);
+  --animate-entrada: entrada 420ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  --animate-tremor: tremor 320ms ease-in-out;
+
+  @keyframes entrada {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes tremor {
+    0%,
+    100% {
+      transform: none;
+    }
+    25% {
+      transform: translateX(-4px);
+    }
+    75% {
+      transform: translateX(4px);
+    }
+  }
 }
 
 :root {
-  /* Source Sans 3 (SIL OFL) servida pelo próprio portal, a partir do pacote @fontsource-variable. */
-  --fonte-principal: "Source Sans 3 Variable";
+  /* Plus Jakarta Sans (SIL OFL) servida pelo próprio portal, a partir do pacote @fontsource-variable. */
+  --fonte-principal: "Plus Jakarta Sans Variable";
   --radius: 0.5rem;
   --background: #f4f6f9; /* cinza-50 */
   --foreground: #344054; /* cinza-700 */
@@ -125,6 +153,7 @@
   --neutro-fundo: #f2f4f7;
   --faixa: #7a2e0e;
   --faixa-fundo: #fef0c7;
+  --marca: #17365d; /* azul-900, PM §18 */
 }
 
 .dark {
@@ -176,6 +205,7 @@
   --neutro-fundo: #222e40;
   --faixa: #fec84b;
   --faixa-fundo: #3d2a0a;
+  --marca: #22487a;
 }
 
 @layer base {
@@ -202,6 +232,11 @@
   h3 {
     @apply text-titulo;
     text-wrap: balance;
+    letter-spacing: -0.012em;
+  }
+  ::placeholder {
+    color: var(--muted-foreground);
+    opacity: 0.8;
   }
   button:not(:disabled),
   [role="button"]:not(:disabled) {

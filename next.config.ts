@@ -17,6 +17,9 @@ const nextConfig: NextConfig = {
   // A suíte E2E usa um diretório próprio para rodar ao lado do servidor de desenvolvimento.
   distDir: process.env.NEXT_DIST_DIR ?? ".next",
   poweredByHeader: false,
+  // Fotos de equipamentos e PDF do termo assinado (as fotos chegam reduzidas pelo navegador;
+  // o servidor valida tipo, tamanho e quantidade de novo).
+  experimental: { serverActions: { bodySizeLimit: "40mb" } },
   turbopack: {
     rules: {
       "*.css": {

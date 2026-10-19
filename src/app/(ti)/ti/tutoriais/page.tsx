@@ -19,7 +19,7 @@ export default async function PaginaTutoriaisTi() {
         }
       />
       <div className="flex flex-col gap-6">
-        <div className="rounded-lg border bg-card shadow-nivel-1">
+        <div className="rounded-2xl border bg-card shadow-nivel-1">
           <TabelaSimples legenda="Tutoriais publicados">
             <thead className="border-b bg-muted/50">
               <tr>

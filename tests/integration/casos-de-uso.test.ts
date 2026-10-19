@@ -9,7 +9,8 @@ import { ErroAutorizacao, ErroNegocio } from "@/server/authz/exigir";
 import { PESSOAS } from "@/server/dados-ficticios/cadastros";
 import { prisma } from "@/server/db";
 import { consumirCodigoAtivacao, definirSenhaPessoal, gerarCodigoAtivacao } from "@/server/modulos/ativacao";
-import { listarMeusEquipamentos, listarAtivos } from "@/server/modulos/consultas";
+import { listarMeusEquipamentos } from "@/server/modulos/consultas";
+import { listarInventario } from "@/server/modulos/inventario";
 import {
   atribuirPerfil,
   concederPermissaoIndividual,
@@ -21,7 +22,7 @@ import {
   obterPessoa,
   redefinirSenhaPelaTi,
 } from "@/server/modulos/pessoas";
-import { criarEmpresa, criarPessoa, limparBanco, senhaAleatoria } from "../apoio/fabricas";
+import { criarEmpresa, criarPessoa, limparBanco, semearInventarioTeste, senhaAleatoria } from "../apoio/fabricas";
 
 async function ator(contaId: string, mfaVerificado = true): Promise<Ator> {
   const a = await carregarAtor(prisma, contaId, { mfaVerificado });
@@ -231,17 +232,16 @@ describe("isolamento de dados de colaboradores", () => {
     await negado(obterPessoa(atorA, b.colaboradorId));
   });
 
-  it("equipamentos: colaborador vê só os seus; TI vê o inventário inteiro", async () => {
-    const dona = PESSOAS[3];
-    const p = await criarPessoa({ id: dona.id, ativada: true });
+  it("equipamentos: colaborador vê só os seus; o inventário é só da TI", async () => {
+    await semearInventarioTeste();
+    const p = await criarPessoa({ id: PESSOAS[3].id, colaboradorExistente: true, ativada: true });
     const meus = await listarMeusEquipamentos(await ator(p.contaId));
-    expect(meus.length).toBeGreaterThan(0);
-    expect(meus.every((m) => m.responsavelId === dona.id)).toBe(true);
-    const todosVisiveis = await listarAtivos(await ator(p.contaId));
-    expect(todosVisiveis.every((m) => m.responsavelId === dona.id)).toBe(true);
+    expect(meus.map((m) => m.patrimonio ?? m.nome).sort()).toEqual(["NBI4512C1", "VLR-004512", "VLR-004513", "VLR-004530"]);
+    expect(meus.every((m) => m.situacao === "ALOCADO")).toBe(true);
+    await negado(listarInventario(await ator(p.contaId)));
 
     const s = await criarPessoa({ perfis: ["SUPERVISOR_TI"], ativada: true });
-    expect((await listarAtivos(await ator(s.contaId))).length).toBeGreaterThan(todosVisiveis.length);
+    expect((await listarInventario(await ator(s.contaId))).totalGeral).toBe(18);
   });
 });
 

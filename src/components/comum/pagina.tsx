@@ -62,7 +62,7 @@ export function Secao({
 }) {
   const idTitulo = id ?? `secao-${titulo.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
   return (
-    <section aria-labelledby={idTitulo} className={cn("min-w-0 rounded-lg border bg-card shadow-nivel-1", className)}>
+    <section aria-labelledby={idTitulo} className={cn("min-w-0 rounded-2xl border bg-card shadow-nivel-1", className)}>
       <div className="flex flex-wrap items-start justify-between gap-2 border-b px-4 py-3 sm:px-5">
         <div className="min-w-0">
           <h2 id={idTitulo} className="flex flex-wrap items-center gap-2 text-base leading-6 font-semibold">

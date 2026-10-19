@@ -57,13 +57,13 @@ export default async function PaginaChamados() {
         }
       />
       <div className="flex flex-col gap-6">
-        <section aria-labelledby="t-abertos" className="rounded-lg border bg-card shadow-nivel-1">
+        <section aria-labelledby="t-abertos" className="rounded-2xl border bg-card shadow-nivel-1">
           <h2 id="t-abertos" className="border-b px-5 py-3 text-base font-semibold">
             Em aberto <span className="tabular font-normal text-muted-foreground">({abertos.length})</span>
           </h2>
           <Tabela itens={abertos} legenda="Chamados em aberto" />
         </section>
-        <section aria-labelledby="t-resolvidos" className="rounded-lg border bg-card shadow-nivel-1">
+        <section aria-labelledby="t-resolvidos" className="rounded-2xl border bg-card shadow-nivel-1">
           <h2 id="t-resolvidos" className="border-b px-5 py-3 text-base font-semibold">
             Resolvidos recentemente <span className="tabular font-normal text-muted-foreground">({resolvidos.length})</span>
           </h2>

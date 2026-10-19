@@ -36,7 +36,7 @@ export default async function PaginaDashboard() {
 
 async function PainelOperacional({ painel, nome, ator }: { painel: Painel; nome: string; ator: Ator }) {
   const integracoes = pode(ator, "integracao.ver") ? await obterEstadoIntegracoes(ator) : null;
-  const { real, ficticio } = painel;
+  const { real, inventario, ficticio } = painel;
   return (
     <>
       <CabecalhoPagina
@@ -55,9 +55,9 @@ async function PainelOperacional({ painel, nome, ator }: { painel: Painel; nome:
           itens={[
             { rotulo: "Pessoas ativas", valor: real.pessoasAtivas, origem: "real" },
             { rotulo: "Contas aguardando ativação", valor: real.contasPendentes, origem: "real", destaque: "atencao" },
-            { rotulo: "Ativos em uso", valor: ficticio.ativosEmUso, origem: "ficticio" },
+            { rotulo: "Equipamentos alocados", valor: inventario.ativosAlocados, origem: "real" },
             { rotulo: "Chamados abertos", valor: ficticio.chamadosAbertos, origem: "ficticio" },
-            { rotulo: "Termos aguardando assinatura", valor: ficticio.termosPendentes.length, origem: "ficticio", destaque: "atencao" },
+            { rotulo: "Termos aguardando assinatura", valor: inventario.termosPendentes, origem: "real", destaque: "atencao" },
           ]}
         />
 
@@ -104,19 +104,29 @@ async function PainelOperacional({ painel, nome, ator }: { painel: Painel; nome:
             )}
           </Secao>
 
-          <Secao titulo="Entregas de equipamento pendentes" simulado>
-            {ficticio.aguardandoEntrega.length === 0 ? (
-              <EstadoVazio icone={PackageCheck} titulo="Nada a entregar" descricao="Não há equipamentos separados aguardando entrega." />
+          <Secao
+            titulo="Entregas de equipamento pendentes"
+            acoes={
+              <Button asChild variant="outline" size="sm">
+                <Link href="/ti/alocacoes?situacao=RESERVADA">Ver reservas</Link>
+              </Button>
+            }
+          >
+            {inventario.reservas.length === 0 ? (
+              <EstadoVazio icone={PackageCheck} titulo="Nada a entregar" descricao="Não há equipamentos reservados aguardando entrega." />
             ) : (
               <ul className="divide-y">
-                {ficticio.aguardandoEntrega.map((a) => (
+                {inventario.reservas.map((a) => (
                   <li key={a.id} className="flex flex-col gap-1 px-4 py-3 sm:px-5">
                     <div className="flex items-center justify-between gap-2">
-                      <span className="font-medium text-titulo">{a.modelo}</span>
+                      <Link href={`/ti/alocacoes?alocacao=${a.alocacaoId}`} className="font-medium text-titulo underline-offset-4 hover:underline">
+                        {a.modelo}
+                      </Link>
                       <span className="tabular text-[13px] text-muted-foreground">{a.patrimonio}</span>
                     </div>
                     <span className="text-[13px] text-muted-foreground">
-                      Para {a.responsavel}, separado em {formatarData(a.desde)}
+                      Para {a.colaborador}
+                      {a.previstaPara ? `, prevista para ${formatarData(a.previstaPara)}` : ""}
                     </span>
                   </li>
                 ))}
@@ -167,7 +177,7 @@ async function PainelOperacional({ painel, nome, ator }: { painel: Painel; nome:
 }
 
 function PainelGerencial({ painel, nome, ator }: { painel: Painel; nome: string; ator: Ator }) {
-  const { real, ficticio } = painel;
+  const { real, inventario, ficticio } = painel;
   return (
     <>
       <CabecalhoPagina
@@ -189,7 +199,7 @@ function PainelGerencial({ painel, nome, ator }: { painel: Painel; nome: string;
             { rotulo: "Pessoas ativas", valor: real.pessoasAtivas, origem: "real" },
             { rotulo: "Empresas do grupo", valor: real.empresasAtivas, origem: "real" },
             { rotulo: "Acessos negados (7 dias)", valor: real.negacoesUltimos7Dias, origem: "real", destaque: "atencao" },
-            { rotulo: "Ativos em uso", valor: ficticio.ativosEmUso, origem: "ficticio" },
+            { rotulo: "Equipamentos alocados", valor: inventario.ativosAlocados, origem: "real" },
             { rotulo: "Chamados em aberto", valor: ficticio.chamadosAbertos, origem: "ficticio" },
           ]}
         />
@@ -202,19 +212,19 @@ function PainelGerencial({ painel, nome, ator }: { painel: Painel; nome: string;
               linhas={real.pessoasPorEmpresa.map((e) => ({ rotulo: e.nome, valor: e.total }))}
             />
           </Secao>
-          <Secao titulo="Distribuição de equipamentos" descricao="Em uso e disponíveis por empresa." simulado>
+          <Secao titulo="Distribuição de equipamentos" descricao="Alocados e disponíveis por empresa proprietária.">
             <Legenda
               itens={[
-                { cor: "bg-chart-1", rotulo: "Em uso" },
+                { cor: "bg-chart-1", rotulo: "Alocados" },
                 { cor: "bg-chart-3", rotulo: "Disponíveis" },
               ]}
             />
             <TabelaBarras
-              legenda="Equipamentos em uso e disponíveis por empresa"
-              colunas={["Empresa", "Em uso + disponíveis"]}
-              linhas={ficticio.equipamentosPorEmpresa.map((e) => ({
+              legenda="Equipamentos alocados e disponíveis por empresa"
+              colunas={["Empresa", "Alocados + disponíveis"]}
+              linhas={inventario.equipamentosPorEmpresa.map((e) => ({
                 rotulo: e.nome,
-                valor: e.emUso,
+                valor: e.alocados,
                 secundario: e.disponiveis,
               }))}
             />
@@ -239,10 +249,10 @@ function PainelGerencial({ painel, nome, ator }: { painel: Painel; nome: string;
           <Secao titulo="Ações operacionais pendentes" descricao="O que depende da equipe para avançar.">
             <ul className="divide-y">
               <ItemPendencia rotulo="Contas aguardando ativação pelo titular" valor={real.contasPendentes} real />
-              <ItemPendencia rotulo="Termos aguardando assinatura" valor={ficticio.termosPendentes.length} />
-              <ItemPendencia rotulo="Equipamentos aguardando entrega" valor={ficticio.aguardandoEntrega.length} />
+              <ItemPendencia rotulo="Termos aguardando assinatura" valor={inventario.termosPendentes} real />
+              <ItemPendencia rotulo="Equipamentos reservados aguardando entrega" valor={inventario.totalReservados} real />
               <ItemPendencia rotulo="Chamados sem responsável" valor={ficticio.chamadosSemResponsavel.length} />
-              <ItemPendencia rotulo="Ativos em manutenção" valor={ficticio.ativosEmManutencao} />
+              <ItemPendencia rotulo="Equipamentos em manutenção" valor={inventario.ativosEmManutencao} real />
             </ul>
           </Secao>
         </div>

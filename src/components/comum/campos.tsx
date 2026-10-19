@@ -1,10 +1,10 @@
 "use client";
 
-import { Eye, EyeOff, Loader2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, ChevronDown, Eye, EyeOff, Search, type LucideIcon } from "lucide-react";
 import { startTransition, useActionState, useId, useState } from "react";
 import { useFormStatus } from "react-dom";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Input, InputComIcone, classeControle } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
 type PropsCampo = {
@@ -13,24 +13,44 @@ type PropsCampo = {
   erro?: string;
   obrigatorio?: boolean;
   className?: string;
+  /** Rótulo visualmente oculto (ex.: busca com placeholder descritivo). Continua acessível. */
+  rotuloOculto?: boolean;
+  /** Indicador curto alinhado à direita do rótulo (ex.: "Calculado"). */
+  etiqueta?: React.ReactNode;
   children: (props: { id: string; "aria-describedby"?: string; "aria-invalid"?: boolean }) => React.ReactNode;
 };
 
-/** Rótulo sempre visível; ajuda e erro abaixo, ligados por aria-describedby. */
-export function Campo({ rotulo, ajuda, erro, obrigatorio, className, children }: PropsCampo) {
+/** Rótulo sempre presente; ajuda e erro abaixo, ligados por aria-describedby. */
+export function Campo({ rotulo, ajuda, erro, obrigatorio, className, rotuloOculto, etiqueta, children }: PropsCampo) {
   const id = useId();
   const idAjuda = ajuda ? `${id}-ajuda` : undefined;
   const idErro = erro ? `${id}-erro` : undefined;
   const descritores = [idErro, idAjuda].filter(Boolean).join(" ") || undefined;
+  const rotuloCampo = (
+    <label htmlFor={id} className={cn("text-[13px] leading-5 font-semibold text-titulo", rotuloOculto && "sr-only")}>
+      {rotulo}
+      {obrigatorio ? (
+        <span className="font-medium text-muted-foreground">
+          <span aria-hidden> *</span>
+          <span className="sr-only"> (obrigatório)</span>
+        </span>
+      ) : null}
+    </label>
+  );
   return (
-    <div className={cn("flex flex-col gap-1.5", className)}>
-      <label htmlFor={id} className="text-sm leading-5 font-medium text-titulo">
-        {rotulo}
-        {obrigatorio ? <span className="font-normal text-muted-foreground"> (obrigatório)</span> : null}
-      </label>
+    <div className={cn("flex flex-col gap-2", className)}>
+      {etiqueta ? (
+        <div className="flex items-center justify-between gap-2">
+          {rotuloCampo}
+          {etiqueta}
+        </div>
+      ) : (
+        rotuloCampo
+      )}
       {children({ id, "aria-describedby": descritores, "aria-invalid": erro ? true : undefined })}
       {erro ? (
-        <p id={idErro} className="text-[13px] leading-[18px] font-medium text-erro">
+        <p id={idErro} className="flex items-start gap-1.5 text-[13px] leading-[18px] font-medium text-erro motion-safe:animate-entrada">
+          <AlertCircle className="mt-px size-3.5 shrink-0" aria-hidden />
           {erro}
         </p>
       ) : null}
@@ -51,57 +71,58 @@ export function CampoSenha({
   senhaDeOutraPessoa,
   autoComplete,
   className,
+  icone,
   ...props
-}: React.ComponentProps<"input"> & { senhaDeOutraPessoa?: boolean }) {
+}: React.ComponentProps<"input"> & { senhaDeOutraPessoa?: boolean; icone?: LucideIcon }) {
   const [visivel, setVisivel] = useState(false);
   const extras = senhaDeOutraPessoa
     ? { "data-1p-ignore": "true", "data-lpignore": "true", "data-bwignore": "true" }
     : {};
+  const alternar = (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-sm"
+      onClick={() => setVisivel((v) => !v)}
+      aria-label={visivel ? "Ocultar senha" : "Mostrar senha"}
+      aria-pressed={visivel}
+      className="text-muted-foreground hover:bg-muted hover:text-titulo"
+    >
+      {visivel ? <EyeOff className="size-[18px]" aria-hidden /> : <Eye className="size-[18px]" aria-hidden />}
+    </Button>
+  );
+  const comuns = {
+    ...props,
+    ...extras,
+    type: visivel ? "text" : "password",
+    autoComplete: senhaDeOutraPessoa ? "new-password" : autoComplete,
+    spellCheck: false,
+    autoCapitalize: "off",
+  };
+  if (icone) return <InputComIcone {...comuns} icone={icone} acessorio={alternar} className={className} />;
   return (
     <div className="relative">
-      <Input
-        {...props}
-        {...extras}
-        type={visivel ? "text" : "password"}
-        autoComplete={senhaDeOutraPessoa ? "new-password" : autoComplete}
-        spellCheck={false}
-        autoCapitalize="off"
-        className={cn("pr-12", className)}
-      />
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon"
-        onClick={() => setVisivel((v) => !v)}
-        aria-label={visivel ? "Ocultar senha" : "Mostrar senha"}
-        aria-pressed={visivel}
-        className="absolute top-0 right-0 text-muted-foreground hover:text-foreground"
-      >
-        {visivel ? <EyeOff className="size-4" aria-hidden /> : <Eye className="size-4" aria-hidden />}
-      </Button>
+      <Input {...comuns} className={cn("pr-12", className)} />
+      <div className="absolute inset-y-0 right-0 flex items-center pr-1">{alternar}</div>
     </div>
   );
 }
 
-/** Botão de envio com estado de carregamento; mantém o rótulo descritivo. */
+/** Busca com ícone; usada nos filtros das tabelas administrativas. */
+export function CampoBusca({ className, ...props }: React.ComponentProps<"input">) {
+  return <InputComIcone icone={Search} type="search" autoComplete="off" {...props} className={className} />;
+}
+
+/** Botão de envio para formulários com `action`: estado de carregamento via useFormStatus. */
 export function BotaoEnvio({
   children,
   pendente,
-  className,
-  disabled,
   ...props
 }: React.ComponentProps<typeof Button> & { pendente: string }) {
   const { pending } = useFormStatus();
   return (
-    <Button type="submit" {...props} disabled={pending || disabled} aria-busy={pending} className={className}>
-      {pending ? (
-        <>
-          <Loader2 className="size-4 animate-spin" aria-hidden />
-          {pendente}
-        </>
-      ) : (
-        children
-      )}
+    <Button type="submit" {...props} carregando={pending} rotuloCarregando={pendente}>
+      {children}
     </Button>
   );
 }
@@ -117,6 +138,7 @@ export function useFormularioAcao<E>(acao: (estado: E, dados: FormData) => Promi
   );
   const aoEnviar = (evento: React.FormEvent<HTMLFormElement>) => {
     evento.preventDefault();
+    if (pendente) return; // evita envio duplicado
     const dados = new FormData(evento.currentTarget);
     startTransition(() => despachar(dados));
   };
@@ -127,47 +149,44 @@ export function BotaoPendente({
   pendente,
   rotuloPendente,
   children,
-  disabled,
   ...props
 }: React.ComponentProps<typeof Button> & { pendente: boolean; rotuloPendente: string }) {
   return (
-    <Button type="submit" {...props} disabled={pendente || disabled} aria-busy={pendente}>
-      {pendente ? (
-        <>
-          <Loader2 className="size-4 animate-spin" aria-hidden />
-          {rotuloPendente}
-        </>
-      ) : (
-        children
-      )}
+    <Button type="submit" {...props} carregando={pendente} rotuloCarregando={rotuloPendente}>
+      {children}
     </Button>
   );
 }
 
+/** Seleção nativa (acessível em teclado, leitor de tela e celular) com o visual dos demais campos. */
 export function Selecao({ className, ...props }: React.ComponentProps<"select">) {
   return (
-    <select
-      {...props}
-      className={cn(
-        "h-11 w-full rounded-md border border-input bg-card px-3 text-base text-foreground lg:h-9 md:text-sm",
-        "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-none",
-        "aria-invalid:border-destructive",
-        className,
-      )}
-    />
+    <div className="relative">
+      <select
+        {...props}
+        className={cn(classeControle, "h-11 cursor-pointer appearance-none pr-10 pl-3.5 lg:h-10", className)}
+      />
+      <ChevronDown
+        aria-hidden
+        className="pointer-events-none absolute top-1/2 right-3.5 size-4 -translate-y-1/2 text-muted-foreground"
+      />
+    </div>
   );
 }
 
 export function AlertaFormulario({ tom, children }: { tom: "erro" | "sucesso"; children: React.ReactNode }) {
+  const Icone = tom === "erro" ? AlertCircle : CheckCircle2;
   return (
     <div
       role={tom === "erro" ? "alert" : "status"}
       className={cn(
-        "rounded-md border px-3 py-2.5 text-sm",
-        tom === "erro" ? "border-erro/30 bg-erro-fundo text-erro" : "border-sucesso/30 bg-sucesso-fundo text-sucesso",
+        "flex items-start gap-2.5 rounded-lg border px-3.5 py-3 text-sm leading-5 font-medium",
+        "motion-safe:animate-entrada",
+        tom === "erro" ? "border-erro/25 bg-erro-fundo text-erro" : "border-sucesso/25 bg-sucesso-fundo text-sucesso",
       )}
     >
-      {children}
+      <Icone className="mt-px size-4 shrink-0" aria-hidden />
+      <div>{children}</div>
     </div>
   );
 }

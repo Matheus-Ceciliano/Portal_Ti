@@ -1,0 +1,3 @@
+-- AlterEnum
+ALTER TYPE "TipoMovimentacao" ADD VALUE 'COMPONENTE_SUBSTITUIDO';
+

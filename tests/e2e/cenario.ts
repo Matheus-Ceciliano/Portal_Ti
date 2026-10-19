@@ -8,6 +8,7 @@ import { criarAuth } from "../../src/server/auth/better-auth";
 import { gerarHashSenha } from "../../src/server/auth/senha";
 import { prisma } from "../../src/server/db";
 import { EMPRESAS, PESSOAS } from "../../src/server/dados-ficticios/cadastros";
+import { semearInventario } from "../../src/server/dados-ficticios/inventario";
 import { gerarCodigoAtivacao } from "../../src/server/modulos/ativacao";
 import { gerarTotp, segredoDaUri } from "../apoio/totp";
 
@@ -59,7 +60,7 @@ async function principal() {
   await prisma.$executeRawUnsafe(`
     TRUNCATE TABLE evento_auditoria, limite_tentativa, codigo_totp_usado, codigo_ativacao, fator_mfa,
       verificacao, credencial_conta, sessao, conta_acesso, permissao_individual, perfil_atribuido,
-      colaborador, empresa, instalacao CASCADE`);
+      colaborador, empresa, instalacao, contador_documento CASCADE`);
   await prisma.instalacao.create({ data: { id: 1, ambiente: "DESENVOLVIMENTO" } });
   await prisma.empresa.createMany({ data: EMPRESAS });
   for (const p of PESSOAS) {
@@ -70,6 +71,22 @@ async function principal() {
   const extra = { id: randomUUID(), nome: "Pessoa Ativação E2E", email: "ativacao.e2e@vallur.test" };
   await prisma.colaborador.create({
     data: { id: extra.id, nome: extra.nome, emailCorporativo: extra.email, cargo: "Analista de TI", departamento: "TI", empresaId: EMPRESAS[3].id },
+  });
+
+  await semearInventario(prisma);
+
+  // Empresa com lista extensa de colaboradores e sem equipamentos (abas cheias e vazias).
+  const volume = await prisma.empresa.create({
+    data: { nome: "Volume Testes E2E Ltda.", sigla: "VOL", cnpj: "00000000000191", cidade: "Cidade Fictícia" },
+  });
+  await prisma.colaborador.createMany({
+    data: Array.from({ length: 40 }, (_, i) => ({
+      nome: `Pessoa Volume ${String(i + 1).padStart(2, "0")}`,
+      emailCorporativo: `volume.${i + 1}@vallur.test`,
+      cargo: "Auxiliar de Obra",
+      departamento: "Obras",
+      empresaId: volume.id,
+    })),
   });
 
   const supervisor = await criarConta(PESSOAS[0], { perfil: "SUPERVISOR_TI", ativada: true, mfa: true });

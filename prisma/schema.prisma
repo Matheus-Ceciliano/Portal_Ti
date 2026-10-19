@@ -52,14 +52,31 @@ model Instalacao {
 }
 
 model Empresa {
-  id            String        @id @default(uuid())
-  nome          String        @unique
-  sigla         String        @unique
-  cnpj          String        @unique
-  cidade        String
-  ativa         Boolean       @default(true)
-  criadoEm      DateTime      @default(now()) @map("criado_em")
-  colaboradores Colaborador[]
+  id             String         @id @default(uuid())
+  /// Razão social.
+  nome           String         @unique
+  /// Nome curto ou sigla usada no dia a dia.
+  sigla          String         @unique
+  /// Nome curto usado na senha inicial de ativação (ex.: Virta, Arvos, Preserve). Não é a sigla.
+  nomeCurtoSenha String?        @map("nome_curto_senha")
+  /// CNPJ canônico: 14 caracteres maiúsculos sem pontuação (aceita o formato alfanumérico).
+  cnpj           String         @unique
+  cidade         String
+  ativa          Boolean        @default(true)
+  /// Nome da pessoa responsável pela empresa (texto livre; não é vínculo de colaborador).
+  responsavel    String?
+  observacoes    String?
+  /// Chave do logotipo no armazenamento privado; nunca é um caminho do sistema de arquivos.
+  logoChave      String?        @map("logo_chave")
+  logoTipo       String?        @map("logo_tipo")
+  criadoEm       DateTime       @default(now()) @map("criado_em")
+  atualizadoEm   DateTime       @default(now()) @updatedAt @map("atualizado_em")
+  colaboradores  Colaborador[]
+  /// Equipamentos de que a empresa é proprietária.
+  ativos         Ativo[]
+  /// Alocações a colaboradores da empresa (instantâneo do vínculo na data da alocação).
+  alocacoes      Alocacao[]
+  itensProprios  ItemAlocacao[]
 
   @@map("empresa")
 }
@@ -68,6 +85,7 @@ model Colaborador {
   id                    String                @id @default(uuid())
   nome                  String
   emailCorporativo      String                @unique @map("email_corporativo")
+  /// Cargo e departamento: texto livre; vazio quando ainda não informado.
   cargo                 String
   departamento          String
   empresaId             String                @map("empresa_id")
@@ -75,14 +93,47 @@ model Colaborador {
   situacao              SituacaoColaborador   @default(ATIVO)
   /// Identidade Microsoft para integrações. Nunca é chave de login (DT-01).
   entraObjectId         String?               @unique @map("entra_object_id")
+  /// Composição de nomes usada nos identificadores (planilha IAM - Novo Usuário).
+  segundoNome           String?               @map("segundo_nome")
+  sobrenomeUtilizado    String?               @map("sobrenome_utilizado")
+  /// Identificadores de acesso. Calculados no cadastro e, depois, só mudam por ação explícita.
+  nomeServidorPc        String?               @map("nome_servidor_pc")
+  /// Unicidade do usuário do servidor/PC: minúsculas, sem acentos e espaços simples.
+  chaveServidorPc       String?               @unique @map("chave_servidor_pc")
+  loginUau              String?               @unique @map("login_uau")
+  loginMicrosoft        String?               @unique @map("login_microsoft")
+  grupoLicencaId        String?               @map("grupo_licenca_id")
+  grupoLicenca          GrupoLicenca?         @relation(fields: [grupoLicencaId], references: [id])
+  /// Foto no armazenamento privado (chave, nunca caminho do sistema de arquivos).
+  fotoChave             String?               @map("foto_chave")
+  fotoTipo              String?               @map("foto_tipo")
   criadoEm              DateTime              @default(now()) @map("criado_em")
   atualizadoEm          DateTime              @updatedAt @map("atualizado_em")
   conta                 ContaAcesso?
   perfis                PerfilAtribuido[]
   permissoesIndividuais PermissaoIndividual[]
+  alocacoes             Alocacao[]
+  devolucoes            Devolucao[]
+  termos                Termo[]
 
   @@index([empresaId])
+  @@index([grupoLicencaId])
   @@map("colaborador")
+}
+
+/// Grupo de licença Microsoft (catálogo local). Define os domínios de login e de e-mail;
+/// não comprova licença atribuída nem domínio verificado no tenant.
+model GrupoLicenca {
+  id            String        @id @default(uuid())
+  nome          String        @unique
+  dominioLogin  String        @map("dominio_login")
+  dominioEmail  String        @map("dominio_email")
+  ativo         Boolean       @default(true)
+  criadoEm      DateTime      @default(now()) @map("criado_em")
+  atualizadoEm  DateTime      @default(now()) @updatedAt @map("atualizado_em")
+  colaboradores Colaborador[]
+
+  @@map("grupo_licenca")
 }
 
 model PerfilAtribuido {
@@ -272,4 +323,521 @@ model EventoAuditoria {
   @@index([criadoEm])
   @@index([acao])
   @@map("evento_auditoria")
+}
+
+/**
+ * Inventário, alocações, manutenções e termos (MODELO_DE_DADOS.md §8 e §9)
+ */
+
+enum CategoriaAtivo {
+  NOTEBOOK
+  DESKTOP
+  MONITOR
+  CELULAR
+  IMPRESSORA
+  CARREGADOR
+  TECLADO
+  MOUSE
+  KIT_TECLADO_MOUSE
+  HEADSET
+  OUTRO
+  /// Componentes internos (peças físicas do estoque de TI): instalados em notebooks, nunca alocados a pessoas.
+  MEMORIA_RAM
+  SSD
+  HD
+}
+
+/// Transições válidas em src/lib/inventario.ts; só os casos de uso mudam a situação.
+enum SituacaoAtivo {
+  DISPONIVEL
+  RESERVADO
+  ALOCADO
+  MANUTENCAO
+  DEVOLVIDO_EM_AVALIACAO
+  BAIXADO
+  /// Componente instalado em um notebook (não é alocação a pessoa).
+  INSTALADO
+}
+
+enum MotivoDesvinculoCarregador {
+  TROCA
+  PERDA
+  DEFEITO
+}
+
+/// Equipamento com controle individual. O responsável atual não é coluna: deriva do item de
+/// alocação em aberto de uma alocação ATIVA (entrega física, Q-27).
+model Ativo {
+  id                  String                      @id @default(uuid())
+  categoria           CategoriaAtivo
+  /// Nome do dispositivo (ex.: NBI5001), em maiúsculas. Obrigatório para notebook; carregador: <notebook>C<n>.
+  nomeDispositivo     String?                     @unique @map("nome_dispositivo")
+  /// Patrimônio, em maiúsculas. Obrigatório, exceto para carregador (identificado pelo nome).
+  patrimonio          String?                     @unique
+  /// Empresa proprietária. Não muda por alocação a colaborador de outra empresa.
+  empresaId           String                      @map("empresa_id")
+  empresa             Empresa                     @relation(fields: [empresaId], references: [id])
+  marca               String
+  modelo              String
+  numeroSerie         String?                     @unique @map("numero_serie")
+  processador         String?
+  memoriaRam          String?                     @map("memoria_ram")
+  armazenamento       String?
+  sistemaOperacional  String?                     @map("sistema_operacional")
+  /// Componente (RAM, SSD, HD): capacidade em GB, tecnologia (RAM), interface (SSD/HD), formato e frequência (RAM).
+  capacidadeGb        Int?                        @map("capacidade_gb")
+  tecnologia          String?
+  interfaceConexao    String?                     @map("interface_conexao")
+  formato             String?
+  frequenciaMhz       Int?                        @map("frequencia_mhz")
+  dataAquisicao       DateTime?                   @map("data_aquisicao") @db.Date
+  garantiaAte         DateTime?                   @map("garantia_ate") @db.Date
+  observacoes         String?
+  situacao            SituacaoAtivo               @default(DISPONIVEL)
+  situacaoDesde       DateTime                    @default(now()) @map("situacao_desde")
+  /// Carregador: notebook a que pertence e posição na sequência (C1, C2...).
+  notebookId          String?                     @map("notebook_id")
+  notebook            Ativo?                      @relation("Carregadores", fields: [notebookId], references: [id])
+  carregadores        Ativo[]                     @relation("Carregadores")
+  sequenciaCarregador Int?                        @map("sequencia_carregador")
+  /// Carregador trocado, perdido ou com defeito: o vínculo é encerrado e preservado no histórico.
+  desvinculadoEm      DateTime?                   @map("desvinculado_em")
+  motivoDesvinculo    MotivoDesvinculoCarregador? @map("motivo_desvinculo")
+  /// O mesmo envio repetido (duplo clique, nova tentativa) devolve o cadastro já feito.
+  chaveRequisicao     String?                     @unique @map("chave_requisicao")
+  criadoPorNome       String?                     @map("criado_por_nome")
+  criadoEm            DateTime                    @default(now()) @map("criado_em")
+  atualizadoEm        DateTime                    @default(now()) @updatedAt @map("atualizado_em")
+  fotos               FotoAtivo[]
+  movimentacoes       MovimentacaoAtivo[]
+  itensAlocacao       ItemAlocacao[]
+  manutencoes         Manutencao[]
+  transferencias      Transferencia[]
+  /// Notebook: peças da configuração (original e componentes instalados) e intervenções.
+  pecasConfiguracao   PecaConfiguracao[]          @relation("PecasEquipamento")
+  intervencoes        IntervencaoConfiguracao[]
+  /// Componente: onde já esteve (ou está) instalado.
+  instalacoes         PecaConfiguracao[]          @relation("PecasComponente")
+
+  @@unique([notebookId, sequenciaCarregador])
+  @@index([empresaId])
+  @@index([situacao])
+  @@index([categoria])
+  @@map("ativo")
+}
+
+enum TipoFoto {
+  FRONTAL
+  TELA
+  TECLADO
+  LATERAIS
+  INFERIOR
+  ETIQUETA_SERIE
+  CARREGADOR
+  OUTRA
+}
+
+enum ContextoFoto {
+  CADASTRO
+  MANUTENCAO
+  CONCLUSAO_MANUTENCAO
+  DEVOLUCAO
+}
+
+/// Foto no armazenamento privado (nunca no banco). Fotos de eventos passados não são substituídas.
+model FotoAtivo {
+  id              String         @id @default(uuid())
+  ativoId         String         @map("ativo_id")
+  ativo           Ativo          @relation(fields: [ativoId], references: [id])
+  contexto        ContextoFoto
+  tipo            TipoFoto
+  chave           String         @unique
+  mime            String
+  tamanho         Int
+  manutencaoId    String?        @map("manutencao_id")
+  manutencao      Manutencao?    @relation(fields: [manutencaoId], references: [id])
+  itemDevolucaoId String?        @map("item_devolucao_id")
+  itemDevolucao   ItemDevolucao? @relation(fields: [itemDevolucaoId], references: [id])
+  enviadaPorNome  String         @map("enviada_por_nome")
+  enviadaEm       DateTime       @default(now()) @map("enviada_em")
+
+  @@index([ativoId])
+  @@map("foto_ativo")
+}
+
+enum TipoMovimentacao {
+  CADASTRO
+  EDICAO
+  TRANSFERENCIA_EMPRESA
+  RESERVA
+  CANCELAMENTO_RESERVA
+  ENTREGA
+  DEVOLUCAO
+  ENVIO_MANUTENCAO
+  CONCLUSAO_MANUTENCAO
+  LIBERACAO_AVALIACAO
+  CARREGADOR_VINCULADO
+  CARREGADOR_DESVINCULADO
+  TRANSFERENCIA_COLABORADOR
+  CONFIGURACAO_ORIGINAL
+  COMPONENTE_INSTALADO
+  COMPONENTE_REMOVIDO
+  COMPONENTE_SUBSTITUIDO
+}
+
+/// Livro-razão de cada equipamento: somente inserção.
+model MovimentacaoAtivo {
+  id                  String           @id @default(uuid())
+  ativoId             String           @map("ativo_id")
+  ativo               Ativo            @relation(fields: [ativoId], references: [id])
+  tipo                TipoMovimentacao
+  situacaoAnterior    SituacaoAtivo?   @map("situacao_anterior")
+  situacaoNova        SituacaoAtivo?   @map("situacao_nova")
+  /// Colaborador envolvido (quem recebeu, devolveu ou estava com o equipamento).
+  colaboradorId       String?          @map("colaborador_id")
+  colaboradorNome     String?          @map("colaborador_nome")
+  alocacaoId          String?          @map("alocacao_id")
+  manutencaoId        String?          @map("manutencao_id")
+  devolucaoId         String?          @map("devolucao_id")
+  realizadoPorContaId String?          @map("realizado_por_conta_id")
+  realizadoPorNome    String           @map("realizado_por_nome")
+  realizadoEm         DateTime         @default(now()) @map("realizado_em")
+  observacao          String?
+
+  @@index([ativoId, realizadoEm])
+  @@map("movimentacao_ativo")
+}
+
+/// RESERVADA = entrega futura preparada (ninguém fica responsável). ATIVA = entrega física
+/// confirmada, independente da assinatura do TER (Q-27).
+enum EstadoAlocacao {
+  RESERVADA
+  ATIVA
+  ENCERRADA
+  CANCELADA
+}
+
+model Alocacao {
+  id                   String         @id @default(uuid())
+  /// Número legível (ALO-AAAA-NNNN).
+  numero               String         @unique
+  colaboradorId        String         @map("colaborador_id")
+  colaborador          Colaborador    @relation(fields: [colaboradorId], references: [id])
+  /// Empresa do colaborador na data da alocação. A proprietária de cada equipamento fica no item.
+  empresaColaboradorId String         @map("empresa_colaborador_id")
+  empresaColaborador   Empresa        @relation(fields: [empresaColaboradorId], references: [id])
+  estado               EstadoAlocacao
+  /// Reserva: data prevista da entrega.
+  previstaPara         DateTime?      @map("prevista_para") @db.Date
+  /// Entrega física (obrigatória a partir de ATIVA).
+  entregueEm           DateTime?      @map("entregue_em")
+  entreguePorNome      String?        @map("entregue_por_nome")
+  observacoes          String?
+  chaveRequisicao      String?        @unique @map("chave_requisicao")
+  criadaPorNome        String         @map("criada_por_nome")
+  criadaEm             DateTime       @default(now()) @map("criada_em")
+  atualizadaEm         DateTime       @default(now()) @updatedAt @map("atualizada_em")
+  canceladaEm          DateTime?      @map("cancelada_em")
+  motivoCancelamento   String?        @map("motivo_cancelamento")
+  itens                ItemAlocacao[]
+  devolucoes           Devolucao[]
+  termos               Termo[]
+
+  @@index([colaboradorId])
+  @@index([estado])
+  @@index([empresaColaboradorId])
+  @@map("alocacao")
+}
+
+enum MotivoEncerramentoItem {
+  DEVOLUCAO
+  MANUTENCAO
+  CANCELAMENTO
+  SUBSTITUICAO
+  TRANSFERENCIA
+}
+
+/// Equipamento dentro de uma alocação. "aberto" é true enquanto o item vale e nulo depois:
+/// o índice único (ativo, aberto) impede duas alocações ou reservas abertas do mesmo equipamento.
+model ItemAlocacao {
+  id                    String                  @id @default(uuid())
+  alocacaoId            String                  @map("alocacao_id")
+  alocacao              Alocacao                @relation(fields: [alocacaoId], references: [id])
+  ativoId               String                  @map("ativo_id")
+  ativo                 Ativo                   @relation(fields: [ativoId], references: [id])
+  /// Empresa proprietária do equipamento na data da alocação (instantâneo).
+  empresaProprietariaId String                  @map("empresa_proprietaria_id")
+  empresaProprietaria   Empresa                 @relation(fields: [empresaProprietariaId], references: [id])
+  aberto                Boolean?                @default(true)
+  encerradoEm           DateTime?               @map("encerrado_em")
+  motivoEncerramento    MotivoEncerramentoItem? @map("motivo_encerramento")
+  encerradoPorNome      String?                 @map("encerrado_por_nome")
+  manutencaoId          String?                 @map("manutencao_id")
+  itemDevolucao         ItemDevolucao?
+
+  @@unique([ativoId, aberto])
+  @@index([alocacaoId])
+  @@map("item_alocacao")
+}
+
+enum AbrangenciaDevolucao {
+  TOTAL
+  PARCIAL
+}
+
+enum EstadoFisico {
+  EXCELENTE
+  BOM
+  REGULAR
+  DANIFICADO
+}
+
+/// Devolução nunca leva o equipamento direto para "disponível": passa por avaliação ou manutenção.
+enum DestinoDevolucao {
+  AVALIACAO
+  MANUTENCAO
+}
+
+model Devolucao {
+  id              String               @id @default(uuid())
+  /// Número legível (DEV-AAAA-NNNN).
+  numero          String               @unique
+  alocacaoId      String               @map("alocacao_id")
+  alocacao        Alocacao             @relation(fields: [alocacaoId], references: [id])
+  colaboradorId   String               @map("colaborador_id")
+  colaborador     Colaborador          @relation(fields: [colaboradorId], references: [id])
+  abrangencia     AbrangenciaDevolucao
+  recebidaEm      DateTime             @map("recebida_em")
+  recebidaPorNome String               @map("recebida_por_nome")
+  observacoes     String?
+  chaveRequisicao String?              @unique @map("chave_requisicao")
+  criadaEm        DateTime             @default(now()) @map("criada_em")
+  itens           ItemDevolucao[]
+  termos          Termo[]
+
+  @@index([alocacaoId])
+  @@map("devolucao")
+}
+
+model ItemDevolucao {
+  id             String           @id @default(uuid())
+  devolucaoId    String           @map("devolucao_id")
+  devolucao      Devolucao        @relation(fields: [devolucaoId], references: [id])
+  itemAlocacaoId String           @unique @map("item_alocacao_id")
+  itemAlocacao   ItemAlocacao     @relation(fields: [itemAlocacaoId], references: [id])
+  estadoFisico   EstadoFisico     @map("estado_fisico")
+  destino        DestinoDevolucao
+  observacoes    String?
+  fotos          FotoAtivo[]
+
+  @@map("item_devolucao")
+}
+
+enum TipoTransferencia {
+  COLABORADOR
+  EMPRESA
+}
+
+enum EstadoTransferencia {
+  PENDENTE
+  CONCLUIDA
+  CANCELADA
+}
+
+/// Transferência do equipamento: de custódia (entre colaboradores) ou de propriedade (entre
+/// empresas). Só a de colaborador fica pendente: reserva antes da entrega física, com a custódia
+/// atual mantida (Q-27). Origem e destino ficam como instantâneo (ids e nomes). Nunca é apagada.
+model Transferencia {
+  id                     String              @id @default(uuid())
+  ativoId                String              @map("ativo_id")
+  ativo                  Ativo               @relation(fields: [ativoId], references: [id])
+  tipo                   TipoTransferencia
+  estado                 EstadoTransferencia
+  /// true enquanto pendente e nulo depois: o índice único impede duas pendentes do mesmo equipamento.
+  pendente               Boolean?            @default(true)
+  colaboradorOrigemId    String?             @map("colaborador_origem_id")
+  colaboradorOrigemNome  String?             @map("colaborador_origem_nome")
+  colaboradorDestinoId   String?             @map("colaborador_destino_id")
+  colaboradorDestinoNome String?             @map("colaborador_destino_nome")
+  alocacaoOrigemId       String?             @map("alocacao_origem_id")
+  alocacaoDestinoId      String?             @map("alocacao_destino_id")
+  empresaOrigemId        String?             @map("empresa_origem_id")
+  empresaOrigemNome      String?             @map("empresa_origem_nome")
+  empresaDestinoId       String?             @map("empresa_destino_id")
+  empresaDestinoNome     String?             @map("empresa_destino_nome")
+  /// Empresa: obrigatório. Colaborador: observação opcional.
+  motivo                 String?
+  /// Pendente: data prevista da entrega física.
+  previstaPara           DateTime?           @map("prevista_para") @db.Date
+  /// Entrega física (colaborador) ou mudança de propriedade (empresa).
+  efetivadaEm            DateTime?           @map("efetivada_em")
+  realizadaPorContaId    String?             @map("realizada_por_conta_id")
+  realizadaPorNome       String              @map("realizada_por_nome")
+  criadaEm               DateTime            @default(now()) @map("criada_em")
+  concluidaPorNome       String?             @map("concluida_por_nome")
+  canceladaEm            DateTime?           @map("cancelada_em")
+  canceladaPorNome       String?             @map("cancelada_por_nome")
+  motivoCancelamento     String?             @map("motivo_cancelamento")
+  /// O mesmo envio repetido (duplo clique, nova tentativa) devolve a transferência já registrada.
+  chaveRequisicao        String?             @unique @map("chave_requisicao")
+
+  @@unique([ativoId, pendente])
+  @@index([ativoId, criadaEm])
+  @@map("transferencia")
+}
+
+enum TipoComponente {
+  MEMORIA_RAM
+  SSD
+  HD
+}
+
+enum TipoIntervencao {
+  CONFIGURACAO_ORIGINAL
+  INSTALACAO
+  REMOCAO
+  SUBSTITUICAO
+}
+
+/// Intervenção na configuração de um notebook: configuração original informada, instalação,
+/// remoção ou substituição de peças. Guarda a configuração anterior e a resultante e nunca é
+/// alterada nem apagada.
+model IntervencaoConfiguracao {
+  id                     String             @id @default(uuid())
+  equipamentoId          String             @map("equipamento_id")
+  equipamento            Ativo              @relation(fields: [equipamentoId], references: [id])
+  tipo                   TipoIntervencao
+  motivo                 String?
+  configuracaoAnterior   String?            @map("configuracao_anterior")
+  configuracaoResultante String             @map("configuracao_resultante")
+  /// Notebook alocado: com quem estava (a alocação não muda por troca de peça).
+  colaboradorNome        String?            @map("colaborador_nome")
+  alocacaoNumero         String?            @map("alocacao_numero")
+  realizadaEm            DateTime           @map("realizada_em")
+  realizadaPorContaId    String?            @map("realizada_por_conta_id")
+  realizadaPorNome       String             @map("realizada_por_nome")
+  criadaEm               DateTime           @default(now()) @map("criada_em")
+  chaveRequisicao        String?            @unique @map("chave_requisicao")
+  pecasInstaladas        PecaConfiguracao[] @relation("PecaInstalada")
+  pecasRemovidas         PecaConfiguracao[] @relation("PecaRemovida")
+
+  @@index([equipamentoId, realizadaEm])
+  @@map("intervencao_configuracao")
+}
+
+/// Peça da configuração de um notebook: original (só a especificação, sem identificação
+/// individual) ou componente físico do estoque (RAM001, SSD001...). "vigente" é true enquanto a
+/// peça está no notebook e nulo depois: o índice único impede o mesmo componente em dois
+/// equipamentos. A configuração atual é a soma das peças vigentes, sem somar a original com a
+/// peça que a substituiu.
+model PecaConfiguracao {
+  id               String                   @id @default(uuid())
+  equipamentoId    String                   @map("equipamento_id")
+  equipamento      Ativo                    @relation("PecasEquipamento", fields: [equipamentoId], references: [id])
+  tipo             TipoComponente
+  /// Componente individual. Peça original: nulo, até ser identificada ao entrar no estoque na remoção.
+  componenteId     String?                  @map("componente_id")
+  componente       Ativo?                   @relation("PecasComponente", fields: [componenteId], references: [id])
+  original         Boolean                  @default(false)
+  capacidadeGb     Int                      @map("capacidade_gb")
+  tecnologia       String?
+  interfaceConexao String?                  @map("interface_conexao")
+  formato          String?
+  vigente          Boolean?                 @default(true)
+  instaladaEm      DateTime                 @map("instalada_em")
+  instaladaPorNome String                   @map("instalada_por_nome")
+  instaladaNaId    String                   @map("instalada_na_id")
+  instaladaNa      IntervencaoConfiguracao  @relation("PecaInstalada", fields: [instaladaNaId], references: [id])
+  removidaEm       DateTime?                @map("removida_em")
+  removidaPorNome  String?                  @map("removida_por_nome")
+  removidaNaId     String?                  @map("removida_na_id")
+  removidaNa       IntervencaoConfiguracao? @relation("PecaRemovida", fields: [removidaNaId], references: [id])
+  motivoRemocao    String?                  @map("motivo_remocao")
+  /// Destino da peça removida que entrou no estoque: disponível, avaliação, manutenção ou baixa.
+  destinoRemocao   SituacaoAtivo?           @map("destino_remocao")
+
+  @@unique([componenteId, vigente])
+  @@index([equipamentoId, vigente])
+  @@map("peca_configuracao")
+}
+
+enum ResultadoManutencao {
+  REPARADO
+  SEM_REPARO
+}
+
+/// "aberta" é true até a conclusão e nula depois: uma só manutenção aberta por equipamento.
+model Manutencao {
+  id                       String               @id @default(uuid())
+  ativoId                  String               @map("ativo_id")
+  ativo                    Ativo                @relation(fields: [ativoId], references: [id])
+  aberta                   Boolean?             @default(true)
+  motivo                   String
+  observacoes              String
+  abertaEm                 DateTime             @default(now()) @map("aberta_em")
+  abertaPorNome            String               @map("aberta_por_nome")
+  /// Equipamento recolhido de um colaborador: quem estava com ele e a confirmação física.
+  recolhidoDeId            String?              @map("recolhido_de_id")
+  recolhidoDeNome          String?              @map("recolhido_de_nome")
+  recolhimentoConfirmadoEm DateTime?            @map("recolhimento_confirmado_em")
+  devolucaoId              String?              @map("devolucao_id")
+  concluidaEm              DateTime?            @map("concluida_em")
+  concluidaPorNome         String?              @map("concluida_por_nome")
+  servicoRealizado         String?              @map("servico_realizado")
+  resultado                ResultadoManutencao?
+  fotos                    FotoAtivo[]
+
+  @@unique([ativoId, aberta])
+  @@index([abertaEm])
+  @@map("manutencao")
+}
+
+enum TipoTermo {
+  TER
+  TDV
+}
+
+enum EstadoTermo {
+  RASCUNHO
+  EMITIDO
+  AGUARDANDO_ASSINATURA
+  ASSINADO
+  CANCELADO
+}
+
+/// TER e TDV têm ciclo próprio: nenhuma mudança no termo altera alocação ou equipamento.
+/// ASSINADO exige o PDF assinado guardado (restrição no banco).
+model Termo {
+  id                        String      @id @default(uuid())
+  numero                    String      @unique
+  tipo                      TipoTermo
+  alocacaoId                String?     @map("alocacao_id")
+  alocacao                  Alocacao?   @relation(fields: [alocacaoId], references: [id])
+  devolucaoId               String?     @map("devolucao_id")
+  devolucao                 Devolucao?  @relation(fields: [devolucaoId], references: [id])
+  colaboradorId             String      @map("colaborador_id")
+  colaborador               Colaborador @relation(fields: [colaboradorId], references: [id])
+  estado                    EstadoTermo
+  versaoModelo              String?     @map("versao_modelo")
+  emitidoEm                 DateTime?   @map("emitido_em")
+  arquivoAssinadoChave      String?     @unique @map("arquivo_assinado_chave")
+  sha256Assinado            String?     @map("sha256_assinado")
+  assinadoRegistradoEm      DateTime?   @map("assinado_registrado_em")
+  assinadoRegistradoPorNome String?     @map("assinado_registrado_por_nome")
+  disponivelAoColaborador   Boolean     @default(false) @map("disponivel_ao_colaborador")
+  canceladoEm               DateTime?   @map("cancelado_em")
+  criadoEm                  DateTime    @default(now()) @map("criado_em")
+
+  @@index([alocacaoId])
+  @@index([devolucaoId])
+  @@index([colaboradorId])
+  @@map("termo")
+}
+
+/// Numeração sequencial de documentos (ALO-2026, DEV-2026, TER-2026...), incrementada de forma atômica.
+model ContadorDocumento {
+  chave String @id
+  valor Int
+
+  @@map("contador_documento")
 }

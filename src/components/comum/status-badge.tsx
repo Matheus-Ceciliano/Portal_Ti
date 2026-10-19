@@ -6,6 +6,7 @@ import {
   Clock,
   Hand,
   Info,
+  Link2,
   Loader,
   Lock,
   type LucideIcon,
@@ -57,11 +58,19 @@ type Definicao = { tom: Tom; icone: LucideIcon; rotulo: string };
 
 export const ESTADOS = {
   ativo: {
-    EM_USO: { tom: "sucesso", icone: CheckCircle2, rotulo: "Em uso" },
     DISPONIVEL: { tom: "info", icone: CircleDashed, rotulo: "Disponível" },
-    AGUARDANDO_ENTREGA: { tom: "atencao", icone: Clock, rotulo: "Aguardando entrega" },
-    EM_MANUTENCAO: { tom: "manual", icone: Hand, rotulo: "Em manutenção" },
+    RESERVADO: { tom: "atencao", icone: Clock, rotulo: "Reservado" },
+    ALOCADO: { tom: "sucesso", icone: CheckCircle2, rotulo: "Alocado" },
+    MANUTENCAO: { tom: "manual", icone: Hand, rotulo: "Em manutenção" },
+    INSTALADO: { tom: "info", icone: Link2, rotulo: "Instalado" },
+    DEVOLVIDO_EM_AVALIACAO: { tom: "atencao", icone: Info, rotulo: "Devolvido em avaliação" },
     BAIXADO: { tom: "neutro", icone: Ban, rotulo: "Baixado" },
+  },
+  alocacao: {
+    RESERVADA: { tom: "atencao", icone: Clock, rotulo: "Reserva" },
+    ATIVA: { tom: "sucesso", icone: CheckCircle2, rotulo: "Entregue" },
+    ENCERRADA: { tom: "neutro", icone: CircleDashed, rotulo: "Encerrada" },
+    CANCELADA: { tom: "neutro", icone: XCircle, rotulo: "Cancelada" },
   },
   chamado: {
     ABERTO: { tom: "atencao", icone: CircleDashed, rotulo: "Aberto" },
@@ -76,6 +85,8 @@ export const ESTADOS = {
     BAIXA: { tom: "neutro", icone: Info, rotulo: "Baixa" },
   },
   termo: {
+    RASCUNHO: { tom: "neutro", icone: CircleDashed, rotulo: "Rascunho" },
+    EMITIDO: { tom: "info", icone: Info, rotulo: "Emitido" },
     AGUARDANDO_ASSINATURA: { tom: "atencao", icone: Clock, rotulo: "Aguardando assinatura" },
     ASSINADO: { tom: "sucesso", icone: CheckCircle2, rotulo: "Assinado" },
     CANCELADO: { tom: "neutro", icone: XCircle, rotulo: "Cancelado" },
