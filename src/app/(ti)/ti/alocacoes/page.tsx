@@ -54,6 +54,8 @@ export default async function PaginaAlocacoes({
         cancelar: pode(ator, "alocacao.cancelar"),
         devolver: pode(ator, "devolucao.registrar"),
         anexarTer: pode(ator, "termo.anexar_assinado"),
+        transferir: pode(ator, "alocacao.criar"),
+        avaliar: pode(ator, "ativo.transicionar"),
       }}
     />
   );

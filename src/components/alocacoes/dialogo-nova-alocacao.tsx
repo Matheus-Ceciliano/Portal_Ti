@@ -9,6 +9,7 @@ import { AlertaFormulario, Campo } from "@/components/comum/campos";
 import { SelecaoPersonalizada } from "@/components/comum/selecao-personalizada";
 import { StatusBadge } from "@/components/comum/status-badge";
 import { LARGURA_MODAL, MODAL_CENTRALIZADO } from "@/components/empresas/posicao-modal";
+import { errosVerificacao, montarVerificacoes, useCondicoesEntrega, VerificacaoCondicoes, type Decisoes } from "@/components/inspecoes/verificacao-entrega";
 import { agoraLocal, ICONE_CATEGORIA, localParaIso } from "@/components/inventario/visual";
 import {
   AlertDialog,
@@ -41,7 +42,9 @@ const carregadorPrincipal = (lista: Equipamento[], notebookId: string) =>
  * entrega física agora (a custódia muda já) ou reserva de entrega futura (ninguém fica
  * responsável). O notebook leva o carregador principal. A empresa proprietária de cada
  * equipamento é mantida; a do colaborador vem do cadastro dele. O número (AL0001...) é gerado
- * só ao confirmar, sem consumir a sequência na revisão.
+ * só ao confirmar, sem consumir a sequência na revisão. Na entrega física, a revisão pede a
+ * verificação técnica de cada equipamento (última inspeção confirmada ou inspeção nova); a
+ * reserva deixa essa verificação para a confirmação da entrega.
  */
 export function DialogoNovaAlocacao({
   aberto,
@@ -72,6 +75,10 @@ export function DialogoNovaAlocacao({
   const [enviando, setEnviando] = useState(false);
   const [chave] = useState(() => crypto.randomUUID());
   const [confirmarDescarte, setConfirmarDescarte] = useState(false);
+  const [decisoes, setDecisoes] = useState<Decisoes>({});
+  const [errosCondicao, setErrosCondicao] = useState<Record<string, string>>({});
+  const verificar = etapa === "revisar" && modo === "ENTREGAR";
+  const { condicoes, erro: erroCondicoes, recarregar: recarregarCondicoes } = useCondicoesEntrega(selecionados, verificar);
 
   useEffect(() => {
     if (!aberto) return;
@@ -95,7 +102,16 @@ export function DialogoNovaAlocacao({
   const responsavel = dados?.responsaveis.find((r) => r.contaId === responsavelId) ?? null;
   const porId = useMemo(() => new Map((dados?.equipamentos ?? []).map((e) => [e.id, e])), [dados]);
   const escolhidos = selecionados.map((id) => porId.get(id)).filter((e): e is Equipamento => Boolean(e));
-  const deOutraEmpresa = colaborador ? escolhidos.filter((e) => e.empresa.id !== colaborador.empresa.id) : [];
+  // Só equipamentos da empresa do colaborador ou alugados a ela (no dia do uso); o servidor confere de novo.
+  const diaUso = modo === "ENTREGAR" ? entrega.slice(0, 10) : prevista || hoje();
+  const elegivel = (e: Equipamento, empresaId: string) => (e.aluguel ? e.aluguel.empresa.id === empresaId && e.aluguel.inicio <= diaUso : e.empresa.id === empresaId);
+  // A empresa escolhida (ou a do colaborador) já mostra o que ela pode receber.
+  const empresaAlvo = colaborador?.empresa.id ?? (empresaFiltro || null);
+  const disponiveisParaEmpresa = empresaAlvo ? (dados?.equipamentos ?? []).filter((e) => elegivel(e, empresaAlvo)) : [];
+  /** Tira da seleção o que a empresa não pode receber (sem empresa, nada fica selecionado). */
+  const manterElegiveis = (empresaId: string) =>
+    setSelecionados((atual) => (empresaId ? atual.filter((id) => { const e = porId.get(id); return e ? elegivel(e, empresaId) : false; }) : []));
+  const alugados = escolhidos.filter((e) => e.aluguel);
   const alterado = Boolean(colaboradorId || selecionados.length || observacoes || responsavelEscolhido);
 
   /** Notebook leva junto o carregador principal (pode ser retirado da seleção); retirar o notebook retira os carregadores dele. */
@@ -122,20 +138,42 @@ export function DialogoNovaAlocacao({
   }
 
   async function confirmar() {
+    // Entrega física: cada equipamento com a própria verificação técnica.
+    let envio: ReturnType<typeof montarVerificacoes> | null = null;
+    if (modo === "ENTREGAR") {
+      if (!condicoes) return;
+      const e = errosVerificacao(condicoes, decisoes);
+      setErrosCondicao(e);
+      if (Object.keys(e).length) {
+        setErroGeral("Confirme a condição de cada equipamento antes da entrega.");
+        document.querySelector('[data-testid="verificacao-condicoes"]')?.scrollIntoView({ block: "start", behavior: "smooth" });
+        return;
+      }
+      envio = montarVerificacoes(condicoes, decisoes);
+    }
     setEnviando(true);
     setErroGeral(null);
-    const r = await acaoCriarAlocacao({
-      colaboradorId,
-      ativoIds: selecionados,
-      modo,
-      responsavelTiContaId: responsavelId,
-      data: modo === "ENTREGAR" ? localParaIso(entrega) : prevista || undefined,
-      observacoes: observacoes || undefined,
-      chaveRequisicao: chave,
-    }).catch(() => ({ ok: false as const, erro: "Não foi possível falar com o servidor. Tente novamente." }));
+    const r = await acaoCriarAlocacao(
+      {
+        colaboradorId,
+        ativoIds: selecionados,
+        modo,
+        responsavelTiContaId: responsavelId,
+        data: modo === "ENTREGAR" ? localParaIso(entrega) : prevista || undefined,
+        observacoes: observacoes || undefined,
+        chaveRequisicao: chave,
+        verificacoes: envio?.verificacoes,
+      },
+      envio?.anexos,
+    ).catch(() => ({ ok: false as const, erro: "Não foi possível falar com o servidor. Tente novamente." }));
     setEnviando(false);
     if (!r.ok) {
       setErroGeral(r.erro);
+      // Problema na verificação técnica: continua na revisão (com a condição recarregada).
+      if (/inspeç|condição/i.test(r.erro)) {
+        recarregarCondicoes();
+        return;
+      }
       setEtapa("preencher");
       setTentativa((t) => t + 1); // a disponibilidade pode ter mudado
       return;
@@ -194,7 +232,22 @@ export function DialogoNovaAlocacao({
                 modo={modo}
                 quando={modo === "ENTREGAR" ? entrega.replace("T", " ") : prevista}
                 observacoes={observacoes}
-                outraEmpresa={deOutraEmpresa.length}
+                alugados={alugados.length}
+                verificacao={
+                  modo === "ENTREGAR" ? (
+                    <VerificacaoCondicoes
+                      condicoes={condicoes}
+                      erro={erroCondicoes}
+                      aoTentarDeNovo={recarregarCondicoes}
+                      decisoes={decisoes}
+                      aoMudar={(id, d) => {
+                        setDecisoes((x) => ({ ...x, [id]: d }));
+                        setErrosCondicao((x) => ({ ...x, [id]: "" }));
+                      }}
+                      erros={errosCondicao}
+                    />
+                  ) : null
+                }
               />
             ) : (
               <div className="flex flex-col gap-5">
@@ -207,7 +260,9 @@ export function DialogoNovaAlocacao({
                         valor={empresaFiltro}
                         aoMudar={(v) => {
                           setEmpresaFiltro(v);
+                          const mantem = colaborador && (!v || colaborador.empresa.id === v);
                           if (v && colaborador && colaborador.empresa.id !== v) setColaboradorId("");
+                          manterElegiveis(v || (mantem ? colaborador.empresa.id : ""));
                         }}
                         vazio="Todas as empresas"
                         opcoes={empresas.map((e) => ({ valor: e.id, rotulo: e.nome }))}
@@ -224,6 +279,8 @@ export function DialogoNovaAlocacao({
                         valor={colaboradorId}
                         aoMudar={(v) => {
                           setColaboradorId(v);
+                          // Outra empresa: sai da seleção o que ela não pode receber.
+                          manterElegiveis(dados.colaboradores.find((x) => x.id === v)?.empresa.id ?? "");
                           setErros((x) => ({ ...x, colaborador: "" }));
                           const c = dados.colaboradores.find((x) => x.id === v);
                           if (c) setEmpresaFiltro(c.empresa.id);
@@ -263,10 +320,10 @@ export function DialogoNovaAlocacao({
                     </span>
                   </legend>
                   <SeletorEquipamentos
-                    equipamentos={dados.equipamentos}
+                    equipamentos={disponiveisParaEmpresa}
+                    semEmpresa={!empresaAlvo}
                     selecionados={selecionados}
                     aoAlternar={alternar}
-                    empresaColaborador={colaborador?.empresa.id ?? null}
                     erro={erros.equipamentos || undefined}
                   />
                 </fieldset>
@@ -323,7 +380,7 @@ export function DialogoNovaAlocacao({
                 <Button variant="secondary" disabled={enviando} onClick={() => setEtapa("preencher")}>
                   Voltar e editar
                 </Button>
-                <Button carregando={enviando} rotuloCarregando="Registrando…" onClick={() => void confirmar()} data-testid="confirmar-alocacao">
+                <Button carregando={enviando} rotuloCarregando="Registrando…" disabled={modo === "ENTREGAR" && !condicoes} onClick={() => void confirmar()} data-testid="confirmar-alocacao">
                   <PackageCheck aria-hidden /> {modo === "ENTREGAR" ? "Confirmar entrega" : "Registrar reserva"}
                 </Button>
               </>
@@ -367,15 +424,16 @@ export function DialogoNovaAlocacao({
 
 function SeletorEquipamentos({
   equipamentos,
+  semEmpresa,
   selecionados,
   aoAlternar,
-  empresaColaborador,
   erro,
 }: {
   equipamentos: Equipamento[];
   selecionados: string[];
   aoAlternar: (e: Equipamento) => void;
-  empresaColaborador: string | null;
+  /** Sem empresa escolhida (nem colaborador), a lista espera: a empresa define o que pode ser entregue. */
+  semEmpresa?: boolean;
   erro?: string;
 }) {
   const [busca, setBusca] = useState("");
@@ -390,7 +448,7 @@ function SeletorEquipamentos({
               <span className="inline-flex h-8 items-center gap-1.5 rounded-md border bg-accent/60 pr-1 pl-2 text-[12.5px] font-medium text-titulo">
                 {e.notebookId ? <PlugZap className="size-3.5 text-muted-foreground" aria-hidden /> : null}
                 <span className="tabular">{e.rotulo}</span>
-                {empresaColaborador && e.empresa.id !== empresaColaborador ? <span className="text-[11px] text-info">· {e.empresa.sigla}</span> : null}
+                {e.aluguel ? <span className="text-[11px] text-info">· alugado de {e.empresa.sigla}</span> : null}
                 <button
                   type="button"
                   onClick={() => aoAlternar(e)}
@@ -404,68 +462,80 @@ function SeletorEquipamentos({
           ))}
         </ul>
       ) : null}
-      <Command
-        label="Equipamentos disponíveis"
-        className={cn("overflow-hidden rounded-xl border", erro && "border-erro")}
-        filter={(valor, termo) => (normalizar(valor).includes(normalizar(termo)) ? 1 : 0)}
-      >
-        <div className="flex items-center gap-2 border-b px-3">
-          <Search className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-          <Command.Input
-            value={busca}
-            onValueChange={setBusca}
-            placeholder="Pesquisar por nome, patrimônio, modelo, marca ou empresa"
-            className="h-11 w-full min-w-0 bg-transparent text-base text-titulo outline-none placeholder:text-muted-foreground/80 md:text-sm lg:h-10"
-          />
-        </div>
-        <Command.List className="max-h-64 overflow-y-auto overscroll-contain p-1.5">
-          <Command.Empty className="px-3 py-6 text-center text-[13px] text-muted-foreground">Nenhum equipamento disponível encontrado.</Command.Empty>
-          {equipamentos.map((e) => {
-            const Icone = ICONE_CATEGORIA[e.categoria];
-            const marcado = selecionados.includes(e.id);
-            const principal = e.categoria === "NOTEBOOK" ? carregadorPrincipal(equipamentos, e.id) : null;
-            return (
-              <Command.Item
-                key={e.id}
-                value={`${texto(e)} ${e.id}`}
-                onSelect={() => aoAlternar(e)}
-                className="flex min-h-10 cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-sm data-[selected=true]:bg-accent"
-              >
-                <span className={cn("grid size-5 shrink-0 place-items-center rounded border", marcado ? "border-primary bg-primary text-primary-foreground" : "border-input bg-card")} aria-hidden>
-                  {marcado ? <Check className="size-3.5" /> : null}
-                </span>
-                {e.miniatura ? (
-                  // eslint-disable-next-line @next/next/no-img-element -- rota privada com sessão
-                  <img src={e.miniatura} alt="" className="size-8 shrink-0 rounded-md border object-cover" loading="lazy" />
-                ) : (
-                  <span className="grid size-8 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground" aria-hidden>
-                    <Icone className="size-4" />
+      {semEmpresa ? (
+        <p className="rounded-xl border border-dashed px-4 py-6 text-center text-[13px] text-muted-foreground" data-testid="selecione-empresa">
+          Selecione a empresa para ver os equipamentos que ela pode receber.
+        </p>
+      ) : (
+        <Command
+          label="Equipamentos disponíveis"
+          className={cn("overflow-hidden rounded-xl border", erro && "border-erro")}
+          filter={(valor, termo) => (normalizar(valor).includes(normalizar(termo)) ? 1 : 0)}
+        >
+          <div className="flex items-center gap-2 border-b px-3">
+            <Search className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+            <Command.Input
+              value={busca}
+              onValueChange={setBusca}
+              placeholder="Pesquisar por nome, patrimônio, modelo, marca ou empresa"
+              className="h-11 w-full min-w-0 bg-transparent text-base text-titulo outline-none placeholder:text-muted-foreground/80 md:text-sm lg:h-10"
+            />
+          </div>
+          <Command.List className="max-h-64 overflow-y-auto overscroll-contain p-1.5">
+            <Command.Empty className="px-3 py-6 text-center text-[13px] text-muted-foreground">Nenhum equipamento disponível para a empresa do colaborador.</Command.Empty>
+            {equipamentos.map((e) => {
+              const Icone = ICONE_CATEGORIA[e.categoria];
+              const marcado = selecionados.includes(e.id);
+              const principal = e.categoria === "NOTEBOOK" ? carregadorPrincipal(equipamentos, e.id) : null;
+              return (
+                <Command.Item
+                  key={e.id}
+                  value={`${texto(e)} ${e.id}`}
+                  onSelect={() => aoAlternar(e)}
+                  className="flex min-h-10 cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-sm data-[selected=true]:bg-accent"
+                >
+                  <span className={cn("grid size-5 shrink-0 place-items-center rounded border", marcado ? "border-primary bg-primary text-primary-foreground" : "border-input bg-card")} aria-hidden>
+                    {marcado ? <Check className="size-3.5" /> : null}
                   </span>
-                )}
-                <span className="min-w-0 flex-1">
-                  <span className="tabular block truncate font-semibold text-titulo">
-                    {e.rotulo}
-                    {e.nomeDispositivo && e.patrimonio ? <span className="font-normal text-muted-foreground"> · {e.patrimonio}</span> : null}
+                  {e.miniatura ? (
+                    // eslint-disable-next-line @next/next/no-img-element -- rota privada com sessão
+                    <img src={e.miniatura} alt="" className="size-8 shrink-0 rounded-md border object-cover" loading="lazy" />
+                  ) : (
+                    <span className="grid size-8 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground" aria-hidden>
+                      <Icone className="size-4" />
+                    </span>
+                  )}
+                  <span className="min-w-0 flex-1">
+                    <span className="tabular block truncate font-semibold text-titulo">
+                      {e.rotulo}
+                      {e.nomeDispositivo && e.patrimonio ? <span className="font-normal text-muted-foreground"> · {e.patrimonio}</span> : null}
+                    </span>
+                    <span className="block truncate text-[12px] text-muted-foreground">
+                      {e.rotuloCategoria} · {e.marca} {e.modelo}
+                      {principal ? (
+                        <span className="text-foreground/80">
+                          {" "}
+                          · <PlugZap className="inline size-3 align-[-1px]" aria-hidden /> leva {principal.rotulo}
+                        </span>
+                      ) : null}
+                    </span>
                   </span>
-                  <span className="block truncate text-[12px] text-muted-foreground">
-                    {e.rotuloCategoria} · {e.marca} {e.modelo}
-                    {principal ? (
-                      <span className="text-foreground/80">
-                        {" "}
-                        · <PlugZap className="inline size-3 align-[-1px]" aria-hidden /> leva {principal.rotulo}
-                      </span>
-                    ) : null}
-                  </span>
-                </span>
-                <span className="shrink-0 text-[12px] font-medium text-muted-foreground" title={e.empresa.nome}>
-                  {e.empresa.sigla}
-                </span>
-                <span className="sr-only">{marcado ? "(selecionado)" : ""}</span>
-              </Command.Item>
-            );
-          })}
-        </Command.List>
-      </Command>
+                  {e.aluguel ? (
+                    <span className="shrink-0 rounded-sm border border-info/25 bg-info-fundo px-1.5 text-[11px] leading-5 font-medium text-info" title={`Propriedade de ${e.empresa.nome}; alugado à empresa do colaborador`}>
+                      Alugado · {e.empresa.sigla}
+                    </span>
+                  ) : (
+                    <span className="shrink-0 text-[12px] font-medium text-muted-foreground" title={e.empresa.nome}>
+                      {e.empresa.sigla}
+                    </span>
+                  )}
+                  <span className="sr-only">{marcado ? "(selecionado)" : ""}</span>
+                </Command.Item>
+              );
+            })}
+          </Command.List>
+        </Command>
+      )}
       {erro ? <p className="text-[13px] font-medium text-erro">{erro}</p> : null}
     </div>
   );
@@ -478,7 +548,8 @@ function Revisao({
   modo,
   quando,
   observacoes,
-  outraEmpresa,
+  alugados,
+  verificacao,
 }: {
   colaborador: OpcoesNovaAlocacao["colaboradores"][number];
   responsavel: string;
@@ -486,15 +557,17 @@ function Revisao({
   modo: "ENTREGAR" | "RESERVAR";
   quando: string;
   observacoes: string;
-  outraEmpresa: number;
+  alugados: number;
+  /** Entrega física: verificação técnica de cada equipamento. */
+  verificacao?: React.ReactNode;
 }) {
   return (
     <section aria-label="Revisão da alocação" className="flex flex-col gap-4">
-      {outraEmpresa ? (
+      {alugados ? (
         <div className="flex items-start gap-2 rounded-xl border border-info/30 bg-info-fundo p-3 text-[13px]" role="note">
           <AlertTriangle className="mt-0.5 size-4 shrink-0 text-info" aria-hidden />
           <span>
-            {outraEmpresa} equipamento(s) de empresa diferente da do colaborador ({colaborador.empresa.nome}). A empresa proprietária de cada patrimônio não muda.
+            {alugados === 1 ? "1 equipamento alugado" : `${alugados} equipamentos alugados`} de outra empresa para a {colaborador.empresa.nome}. A propriedade não muda.
           </span>
         </div>
       ) : null}
@@ -556,6 +629,9 @@ function Revisao({
           );
         })}
       </ul>
+      {verificacao ?? (
+        <p className="text-[12.5px] text-muted-foreground">A verificação técnica de cada equipamento é feita na confirmação da entrega.</p>
+      )}
     </section>
   );
 }

@@ -3,6 +3,8 @@ import { ehComponente } from "@/lib/componentes";
 import { CATEGORIAS_COMPONENTE, ESTADOS_FISICOS, ROTULO_SITUACAO, type Situacao } from "@/lib/inventario";
 import { registrarAuditoria } from "@/server/auditoria";
 import { carregarAtor, type Ator } from "@/server/authz/ator";
+import { alugueisQueValem, diaDe, exigirEmpresaAutorizada, notebooksDosCarregadores } from "./alugueis";
+import { fotosDasVerificacoes, prepararVerificacoes, registrarVerificacoes, type EntradaVerificacao, type InstantaneoEntrega } from "./inspecoes";
 import { PERFIS_TI } from "@/server/authz/catalogo";
 import { ErroAutorizacao, ErroNegocio, executarCasoDeUso, exigirPermissao, pode } from "@/server/authz/exigir";
 import { prisma, type ClienteBanco } from "@/server/db";
@@ -214,11 +216,13 @@ export async function obterAlocacao(ator: Ator, id: string) {
               orderBy: [{ ativo: { categoria: "asc" } }, { ativo: { nomeDispositivo: "asc" } }],
               include: {
                 empresaProprietaria: { select: { id: true, nome: true, sigla: true } },
+                verificacaoEntrega: { select: { modo: true, instantaneo: true, verificadaEm: true, responsavelNome: true } },
                 ativo: {
                   select: {
                     id: true,
                     categoria: true,
                     ...SELECAO_TIPO,
+                    inspecoes: { where: { pendente: true }, take: 1, select: { id: true } },
                     nomeDispositivo: true,
                     patrimonio: true,
                     marca: true,
@@ -227,6 +231,7 @@ export async function obterAlocacao(ator: Ator, id: string) {
                     situacao: true,
                     notebookId: true,
                     fotos: { where: { contexto: "CADASTRO", removidaEm: null }, orderBy: [{ tipo: "asc" }], take: 1, select: { id: true } },
+                    transferencias: { where: { pendente: true }, take: 1 },
                   },
                 },
                 itemDevolucao: {
@@ -285,7 +290,33 @@ export async function obterAlocacao(ator: Ator, id: string) {
           situacao: i.ativo.situacao,
           carregadorDe: i.ativo.notebookId,
           miniatura: i.ativo.fotos[0] ? urlFoto(i.ativo.fotos[0].id) : null,
+          parteKit: i.ativo.parteKit,
+          /** Devolvido e aguardando a inspeção técnica. */
+          inspecaoPendente: i.ativo.inspecoes.length > 0 && i.ativo.situacao === "DEVOLVIDO_EM_AVALIACAO",
         },
+        /** Condição verificada na entrega física (instantâneo imutável para o TER). */
+        verificacao: i.verificacaoEntrega
+          ? {
+              modo: i.verificacaoEntrega.modo,
+              verificadaEm: i.verificacaoEntrega.verificadaEm.toISOString(),
+              responsavel: i.verificacaoEntrega.responsavelNome,
+              instantaneo: i.verificacaoEntrega.instantaneo as unknown as InstantaneoEntrega,
+            }
+          : null,
+        /** Transferência para outro colaborador reservada (a custódia atual continua até a entrega). */
+        transferenciaPendente: (() => {
+          const t = i.ativo.transferencias[0];
+          return t
+            ? {
+                id: t.id,
+                colaborador: { id: t.colaboradorDestinoId!, nome: t.colaboradorDestinoNome! },
+                previstaPara: t.previstaPara?.toISOString().slice(0, 10) ?? null,
+                motivo: t.motivo,
+                registradaEm: t.criadaEm.toISOString(),
+                registradaPorNome: t.realizadaPorNome,
+              }
+            : null;
+        })(),
         devolucao: i.itemDevolucao
           ? {
               numero: i.itemDevolucao.devolucao.numero,
@@ -388,6 +419,8 @@ export async function opcoesNovaAlocacao(ator: Ator) {
           marca: true,
           modelo: true,
           notebookId: true,
+          desvinculadoEm: true,
+          empresaId: true,
           sequenciaCarregador: true,
           empresa: { select: { id: true, nome: true, sigla: true } },
           fotos: { where: { contexto: "CADASTRO", removidaEm: null }, orderBy: [{ tipo: "asc" }, { enviadaEm: "asc" }], take: 1, select: { id: true } },
@@ -395,6 +428,8 @@ export async function opcoesNovaAlocacao(ator: Ator) {
       }),
       responsaveisTiElegiveis(prisma),
     ]);
+    // Aluguel vigente de cada equipamento (ou do notebook, no carregador): define a empresa que pode usá-lo.
+    const alugueis = await alugueisQueValem(prisma, disponiveis);
     return {
       colaboradores,
       equipamentos: disponiveis.map(({ categoriaEquipamento: _c, parteKit: _p, fotos, ...a }) => ({
@@ -402,6 +437,10 @@ export async function opcoesNovaAlocacao(ator: Ator) {
         rotulo: rotuloAtivo(a),
         rotuloCategoria: rotuloTipo({ categoriaEquipamento: _c, parteKit: _p }),
         miniatura: fotos[0] ? urlFoto(fotos[0].id) : null,
+        aluguel: (() => {
+          const v = alugueis.get(a.id);
+          return v ? { empresa: v.empresaLocataria, inicio: v.inicio.toISOString().slice(0, 10) } : null;
+        })(),
       })),
       responsaveis,
       /** Quem está registrando, quando é elegível: começa como responsável. */
@@ -425,6 +464,8 @@ export type EntradaAlocacao = {
   data?: string | null;
   observacoes?: string | null;
   chaveRequisicao?: string;
+  /** Entrega física: a verificação técnica de cada equipamento (confirmar a última inspeção ou uma nova). */
+  verificacoes?: EntradaVerificacao[];
 };
 
 export async function criarAlocacao(ator: Ator, entrada: EntradaAlocacao) {
@@ -453,12 +494,19 @@ export async function criarAlocacao(ator: Ator, entrada: EntradaAlocacao) {
     if (previstaPara && previstaPara.toISOString().slice(0, 10) < new Date().toISOString().slice(0, 10)) {
       throw new ErroNegocio("Data prevista: não pode estar no passado.");
     }
+    // Entrega física exige a verificação técnica de cada item; a reserva fica para a confirmação.
+    const verificacoes = entregar ? await prepararVerificacoes(prisma, ids, entrada.verificacoes) : new Map();
+    const fotos = fotosDasVerificacoes(verificacoes);
+    if (fotos.length) exigirPermissao(ator, "evidencia.enviar");
+    await gravarArquivosFotos(fotos);
 
     try {
       return await prisma.$transaction(async (tx) => {
         // Trava os equipamentos e só então confere a situação: duas alocações simultâneas do
         // mesmo patrimônio não passam (o índice único do item aberto é a última barreira).
-        await travarAtivos(tx, ids);
+        // Os notebooks dos carregadores também: o aluguel do notebook decide o uso do carregador.
+        const previos = await tx.ativo.findMany({ where: { id: { in: ids } }, select: { notebookId: true, desvinculadoEm: true } });
+        await travarAtivos(tx, [...ids, ...notebooksDosCarregadores(previos)]);
         const ativos = await tx.ativo.findMany({ where: { id: { in: ids } } });
         if (ativos.length !== ids.length) throw new ErroNegocio("Um dos equipamentos não foi encontrado.");
         const componente = ativos.find((a) => ehComponente(a.categoria));
@@ -474,6 +522,8 @@ export async function criarAlocacao(ator: Ator, entrada: EntradaAlocacao) {
               : `${rotuloAtivo(a)} não está disponível (${ROTULO_SITUACAO[a.situacao as Situacao].toLowerCase()}).`,
           );
         }
+        // Só a empresa proprietária ou, com aluguel vigente, a locatária (no dia do uso).
+        await exigirEmpresaAutorizada(tx, ativos, colaborador.empresaId, entregueEm ? diaDe(entregueEm) : previstaPara ? previstaPara.toISOString().slice(0, 10) : diaDe(new Date()));
         const quando = entregueEm ?? new Date();
         const numero = await proximoNumeroAlocacao(tx);
         const alocacao = await tx.alocacao.create({
@@ -493,7 +543,9 @@ export async function criarAlocacao(ator: Ator, entrada: EntradaAlocacao) {
             criadaPorNome: ator.nome,
             itens: { create: ativos.map((a) => ({ ativoId: a.id, empresaProprietariaId: a.empresaId })) },
           },
+          include: { itens: { select: { id: true, ativoId: true } } },
         });
+        if (entregar) await registrarVerificacoes(tx, ator, alocacao.id, alocacao.itens, verificacoes);
         for (const a of ativos) {
           await mudarSituacao(tx, ator, { id: a.id, situacao: a.situacao as Situacao, rotulo: rotuloAtivo(a) }, entregar ? "ALOCADO" : "RESERVADO", {
             tipo: entregar ? "ENTREGA" : "RESERVA",
@@ -513,11 +565,13 @@ export async function criarAlocacao(ator: Ator, entrada: EntradaAlocacao) {
             equipamentos: ativos.length,
             equipamentosDeOutraEmpresa: outraEmpresa,
             responsavelTi: responsavel.nome,
+            verificacoesTecnicas: entregar ? ativos.length : 0,
           }),
         );
         return { id: alocacao.id, numero, repetido: false };
       });
     } catch (erro) {
+      await descartarFotos(fotos.map((f) => f.chave));
       // Envio repetido em paralelo: o outro pedido já gravou e este viu os equipamentos alocados.
       if (chave) {
         const ja = await prisma.alocacao.findUnique({ where: { chaveRequisicao: chave }, select: { id: true, numero: true } });
@@ -529,34 +583,57 @@ export async function criarAlocacao(ator: Ator, entrada: EntradaAlocacao) {
 }
 
 /** Reserva → entrega física: a partir daqui a pessoa é responsável pelos equipamentos. */
-export async function confirmarEntrega(ator: Ator, entrada: { alocacaoId: string; data?: string | null }) {
+export async function confirmarEntrega(ator: Ator, entrada: { alocacaoId: string; data?: string | null; verificacoes?: EntradaVerificacao[] }) {
   return executarCasoDeUso(ator, async () => {
     const { origem } = exigirPermissao(ator, "alocacao.confirmar_entrega");
     if (!UUID.test(entrada.alocacaoId)) throw new ErroNegocio("Alocação não encontrada.");
     const entregueEm = lerMomento(entrada.data, "Data da entrega");
-    return prisma.$transaction(async (tx) => {
-      const previa = await tx.alocacao.findUnique({ where: { id: entrada.alocacaoId }, select: { itens: { where: { aberto: true }, select: { ativoId: true } } } });
-      if (!previa) throw new ErroNegocio("Alocação não encontrada.");
-      await travarAtivos(tx, previa.itens.map((i) => i.ativoId));
-      const a = await tx.alocacao.findUniqueOrThrow({
-        where: { id: entrada.alocacaoId },
-        include: { colaborador: { select: { id: true, nome: true } }, itens: { where: { aberto: true }, include: { ativo: true } } },
-      });
-      if (a.estado !== "RESERVADA") throw new ErroNegocio("Só uma reserva pode ter a entrega confirmada.");
-      if (!a.itens.length) throw new ErroNegocio("A reserva não tem equipamentos.");
-      for (const i of a.itens) {
-        await mudarSituacao(tx, ator, { id: i.ativo.id, situacao: i.ativo.situacao as Situacao, rotulo: rotuloAtivo(i.ativo) }, "ALOCADO", {
-          tipo: "ENTREGA",
-          colaborador: a.colaborador,
-          alocacaoId: a.id,
-          observacao: `${a.numero}: entrega física confirmada.`,
-          quando: entregueEm,
+    // A entrega física exige a verificação técnica de cada item reservado.
+    const reservados = (await prisma.itemAlocacao.findMany({ where: { alocacaoId: entrada.alocacaoId, aberto: true }, select: { ativoId: true } })).map((i) => i.ativoId);
+    const verificacoes = await prepararVerificacoes(prisma, reservados, entrada.verificacoes);
+    const fotos = fotosDasVerificacoes(verificacoes);
+    if (fotos.length) exigirPermissao(ator, "evidencia.enviar");
+    await gravarArquivosFotos(fotos);
+    try {
+      return await prisma.$transaction(async (tx) => {
+        const previa = await tx.alocacao.findUnique({
+          where: { id: entrada.alocacaoId },
+          select: { itens: { where: { aberto: true }, select: { ativoId: true, ativo: { select: { notebookId: true, desvinculadoEm: true } } } } },
         });
-      }
-      await tx.alocacao.update({ where: { id: a.id }, data: { estado: "ATIVA", entregueEm, entreguePorNome: ator.nome } });
-      await registrarAuditoria(tx, auditar(ator, origem, "alocacao.confirmar_entrega", { id: a.id, descricao: a.numero }, { equipamentos: a.itens.length }));
-      return { numero: a.numero };
-    });
+        if (!previa) throw new ErroNegocio("Alocação não encontrada.");
+        await travarAtivos(tx, [...previa.itens.map((i) => i.ativoId), ...notebooksDosCarregadores(previa.itens.map((i) => i.ativo))]);
+        const a = await tx.alocacao.findUniqueOrThrow({
+          where: { id: entrada.alocacaoId },
+          include: { colaborador: { select: { id: true, nome: true, empresaId: true } }, itens: { where: { aberto: true }, include: { ativo: true } } },
+        });
+        if (a.estado !== "RESERVADA") throw new ErroNegocio("Só uma reserva pode ter a entrega confirmada.");
+        if (!a.itens.length) throw new ErroNegocio("A reserva não tem equipamentos.");
+        if (a.itens.length !== reservados.length || a.itens.some((i) => !verificacoes.has(i.ativoId))) {
+          throw new ErroNegocio("A reserva mudou enquanto a entrega era conferida. Revise os equipamentos.");
+        }
+        // A entrega confere de novo: o aluguel pode ter terminado desde a reserva.
+        await exigirEmpresaAutorizada(tx, a.itens.map((i) => i.ativo), a.colaborador.empresaId, diaDe(entregueEm));
+        await registrarVerificacoes(tx, ator, a.id, a.itens.map((i) => ({ id: i.id, ativoId: i.ativoId })), verificacoes);
+        for (const i of a.itens) {
+          await mudarSituacao(tx, ator, { id: i.ativo.id, situacao: i.ativo.situacao as Situacao, rotulo: rotuloAtivo(i.ativo) }, "ALOCADO", {
+            tipo: "ENTREGA",
+            colaborador: a.colaborador,
+            alocacaoId: a.id,
+            observacao: `${a.numero}: entrega física confirmada.`,
+            quando: entregueEm,
+          });
+        }
+        await tx.alocacao.update({ where: { id: a.id }, data: { estado: "ATIVA", entregueEm, entreguePorNome: ator.nome } });
+        await registrarAuditoria(
+          tx,
+          auditar(ator, origem, "alocacao.confirmar_entrega", { id: a.id, descricao: a.numero }, { equipamentos: a.itens.length, verificacoesTecnicas: a.itens.length }),
+        );
+        return { numero: a.numero };
+      });
+    } catch (erro) {
+      await descartarFotos(fotos.map((f) => f.chave));
+      throw traduzirConflito(erro);
+    }
   });
 }
 

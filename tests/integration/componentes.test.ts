@@ -10,11 +10,12 @@ import { ErroAutorizacao } from "@/server/authz/exigir";
 import { prisma } from "@/server/db";
 import { criarAlocacao } from "@/server/modulos/alocacoes";
 import { instalarComponente, removerComponente, substituirComponente } from "@/server/modulos/componentes";
-import { cadastrarEquipamento, editarEquipamento, listarInventario, obterEquipamento, type DadosEquipamento } from "@/server/modulos/inventario";
+import { editarEquipamento, listarInventario, obterEquipamento, type DadosEquipamento } from "@/server/modulos/inventario";
 import { enviarParaManutencao } from "@/server/modulos/manutencoes";
 import { transferirColaborador } from "@/server/modulos/transferencias";
 import { MARCA, MODELO, PROCESSADOR } from "../apoio/catalogo";
 import { criarEmpresa, criarPessoa, limparBanco } from "../apoio/fabricas";
+import { cadastrarComInspecao, verificacoesNovas } from "../apoio/inspecao";
 
 async function ator(contaId: string): Promise<Ator> {
   const a = await carregarAtor(prisma, contaId, { mfaVerificado: true });
@@ -49,7 +50,7 @@ const peca = (empresaId: string, categoria: "MEMORIA_RAM" | "SSD" | "HD", capaci
 async function cenario() {
   const empresa = await criarEmpresa();
   const supervisor = await ator((await criarPessoa({ perfis: ["SUPERVISOR_TI"], ativada: true })).contaId);
-  const pessoa = await criarPessoa({ ativada: true });
+  const pessoa = await criarPessoa({ ativada: true, empresaId: empresa.id });
   return { empresa, supervisor, pessoa };
 }
 
@@ -62,7 +63,7 @@ beforeEach(limparBanco);
 describe("cadastro simples do notebook", () => {
   it("guarda só a especificação: nenhuma peça física, nenhum estoque fictício; C1 continua automático", async () => {
     const { empresa, supervisor } = await cenario();
-    const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
+    const nb = await cadastrarComInspecao(supervisor, { dados: notebook(empresa.id) });
     const a = await ficha(nb.id);
     expect([a.memoriaRam, a.armazenamento, a.processador]).toEqual(["16 GB DDR4", "SSD NVMe/PCIe 512 GB", "Intel Core i5"]);
     expect(await componentesFisicos()).toBe(0);
@@ -75,57 +76,57 @@ describe("cadastro simples do notebook", () => {
     expect(await prisma.intervencaoConfiguracao.count({ where: { equipamentoId: nb.id, tipo: "CONFIGURACAO_ORIGINAL" } })).toBe(1);
 
     // Sem configuração: nada é inventado.
-    const vazio = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5002, null) });
+    const vazio = await cadastrarComInspecao(supervisor, { dados: notebook(empresa.id, 5002, null) });
     expect(await ficha(vazio.id)).toMatchObject({ memoriaRam: null, armazenamento: null });
     expect(await vigentes(vazio.id)).toHaveLength(0);
     expect(await componentesFisicos()).toBe(0);
 
     // SSD e HD juntos.
-    const ambos = await cadastrarEquipamento(supervisor, {
+    const ambos = await cadastrarComInspecao(supervisor, {
       dados: notebook(empresa.id, 5003, { memoria: { capacidadeGb: 8, tecnologia: null }, armazenamento: [{ tipo: "SSD", capacidadeGb: 256, interfaceConexao: "SATA" }, { tipo: "HD", capacidadeGb: 1000, interfaceConexao: null }] }),
     });
     expect((await ficha(ambos.id)).armazenamento).toBe("SSD SATA 256 GB + HD 1 TB");
-    await expect(cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5004, { memoria: { capacidadeGb: 16, tecnologia: "DDR9" }, armazenamento: [] }) })).rejects.toThrow(/Tecnologia/);
+    await expect(cadastrarComInspecao(supervisor, { dados: notebook(empresa.id, 5004, { memoria: { capacidadeGb: 16, tecnologia: "DDR9" }, armazenamento: [] }) })).rejects.toThrow(/Tecnologia/);
   });
 });
 
 describe("peças no estoque", () => {
   it("RAM, SSD e HD com identificação automática e sequências próprias; sem patrimônio; validação no servidor", async () => {
     const { empresa, supervisor } = await cenario();
-    const ram1 = await cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 16, { frequenciaMhz: "3200", numeroSerie: "km-001" }) });
-    const ssd1 = await cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "SSD", 512) });
-    const hd1 = await cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "HD", 1000) });
-    const ram2 = await cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 8) });
+    const ram1 = await cadastrarComInspecao(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 16, { frequenciaMhz: "3200", numeroSerie: "km-001" }) });
+    const ssd1 = await cadastrarComInspecao(supervisor, { dados: peca(empresa.id, "SSD", 512) });
+    const hd1 = await cadastrarComInspecao(supervisor, { dados: peca(empresa.id, "HD", 1000) });
+    const ram2 = await cadastrarComInspecao(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 8) });
     const nomes = await Promise.all([ram1, ssd1, hd1, ram2].map(async (c) => (await ficha(c.id)).nomeDispositivo));
     expect(nomes).toEqual(["RAM001", "SSD001", "HDD001", "RAM002"]);
     expect(await ficha(ram1.id)).toMatchObject({ patrimonio: null, situacao: "DISPONIVEL", capacidadeGb: 16, tecnologia: "DDR4", formato: "SO-DIMM", frequenciaMhz: 3200, numeroSerie: "KM-001" });
     // Cadastros simultâneos não repetem número.
-    const juntos = await Promise.all([1, 2, 3].map(() => cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "SSD", 256) })));
+    const juntos = await Promise.all([1, 2, 3].map(() => cadastrarComInspecao(supervisor, { dados: peca(empresa.id, "SSD", 256) })));
     expect(new Set(await Promise.all(juntos.map(async (c) => (await ficha(c.id)).nomeDispositivo))).size).toBe(3);
 
-    await expect(cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 0) })).rejects.toThrow(/capacidade/);
-    await expect(cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "SSD", 512, { interfaceConexao: "USB" }) })).rejects.toThrow(/Interface/);
-    await expect(cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 8, { numeroSerie: "KM-001" }) })).rejects.toThrow(/série já está cadastrado/);
+    await expect(cadastrarComInspecao(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 0) })).rejects.toThrow(/capacidade/);
+    await expect(cadastrarComInspecao(supervisor, { dados: peca(empresa.id, "SSD", 512, { interfaceConexao: "USB" }) })).rejects.toThrow(/Interface/);
+    await expect(cadastrarComInspecao(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 8, { numeroSerie: "KM-001" }) })).rejects.toThrow(/série já está cadastrado/);
   });
 });
 
 describe("instalação, substituição e remoção", () => {
   async function preparado() {
     const base = await cenario();
-    const nb = await cadastrarEquipamento(base.supervisor, { dados: notebook(base.empresa.id) });
+    const nb = await cadastrarComInspecao(base.supervisor, { dados: notebook(base.empresa.id) });
     return { ...base, nb };
   }
 
   it("instalar soma à configuração; substituir não duplica; remover devolve ao estoque; histórico com antes e depois", async () => {
     const { empresa, supervisor, nb } = await preparado();
-    const extra = await cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 8) }); // RAM001
+    const extra = await cadastrarComInspecao(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 8) }); // RAM001
     await instalarComponente(supervisor, { notebookId: nb.id, componenteId: extra.id, motivo: "Upgrade" });
     expect((await ficha(nb.id)).memoriaRam).toBe("24 GB DDR4");
     expect(await ficha(extra.id)).toMatchObject({ situacao: "INSTALADO" });
 
     // Substituição da peça original (sem identificação): a nova entra no lugar dela.
     const [original] = (await vigentes(nb.id)).filter((p) => p.original && p.tipo === "MEMORIA_RAM");
-    const grande = await cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 16) }); // RAM002
+    const grande = await cadastrarComInspecao(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 16) }); // RAM002
     const r = await substituirComponente(supervisor, { notebookId: nb.id, pecaId: original.id, componenteId: grande.id, motivo: "Memória original com defeito" });
     expect(r).toMatchObject({ anterior: "RAM 24 GB DDR4 · SSD NVMe/PCIe 512 GB", resultante: "RAM 24 GB DDR4 · SSD NVMe/PCIe 512 GB" });
     const antiga = await prisma.pecaConfiguracao.findUniqueOrThrow({ where: { id: original.id } });
@@ -133,7 +134,7 @@ describe("instalação, substituição e remoção", () => {
     expect(await componentesFisicos()).toBe(2); // nenhum código inventado para a peça original
 
     // Substituição de peça identificada: a removida volta ao estoque.
-    const maior = await cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 32) }); // RAM003
+    const maior = await cadastrarComInspecao(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 32) }); // RAM003
     const linhaExtra = (await vigentes(nb.id)).find((p) => p.componenteId === extra.id)!;
     await substituirComponente(supervisor, { notebookId: nb.id, pecaId: linhaExtra.id, componenteId: maior.id, motivo: "Upgrade", destino: "DISPONIVEL" });
     expect((await ficha(nb.id)).memoriaRam).toBe("48 GB DDR4"); // 16 (RAM002) + 32 (RAM003)
@@ -186,7 +187,7 @@ describe("instalação, substituição e remoção", () => {
 
   it("exige motivo e destino; a mesma peça não é removida duas vezes; notebook baixado não recebe intervenção", async () => {
     const { empresa, supervisor, nb } = await preparado();
-    const ram = await cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 8) });
+    const ram = await cadastrarComInspecao(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 8) });
     await instalarComponente(supervisor, { notebookId: nb.id, componenteId: ram.id });
     const linha = (await vigentes(nb.id)).find((p) => p.componenteId === ram.id)!;
     await expect(removerComponente(supervisor, { notebookId: nb.id, pecaId: linha.id, motivo: " ", destino: "DISPONIVEL" })).rejects.toThrow(/motivo/);
@@ -200,9 +201,9 @@ describe("instalação, substituição e remoção", () => {
 
   it("uma peça nunca fica em dois notebooks, nem com instalações simultâneas", async () => {
     const { empresa, supervisor } = await cenario();
-    const a = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5101) });
-    const b = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5102) });
-    const ram = await cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 8) });
+    const a = await cadastrarComInspecao(supervisor, { dados: notebook(empresa.id, 5101) });
+    const b = await cadastrarComInspecao(supervisor, { dados: notebook(empresa.id, 5102) });
+    const ram = await cadastrarComInspecao(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 8) });
     const r = await Promise.allSettled([a, b].map((n) => instalarComponente(supervisor, { notebookId: n.id, componenteId: ram.id })));
     expect(r.filter((x) => x.status === "fulfilled")).toHaveLength(1);
     expect(String((r.find((x) => x.status === "rejected") as PromiseRejectedResult).reason)).toMatch(/não está disponível|outro equipamento/);
@@ -221,20 +222,20 @@ describe("instalação, substituição e remoção", () => {
 describe("pessoas e notebook alocado", () => {
   it("RAM, SSD e HD nunca são alocados a pessoas (servidor e banco)", async () => {
     const { empresa, supervisor, pessoa } = await cenario();
-    const ram = await cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 8) });
-    await expect(criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [ram.id], modo: "ENTREGAR" })).rejects.toThrow(/não são alocados a pessoas/);
-    await expect(transferirColaborador(supervisor, { ativoId: ram.id, colaboradorId: pessoa.colaboradorId, modo: "ENTREGAR", alocacaoAtualId: null })).rejects.toThrow(/não são alocados a pessoas/);
-    const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5201) });
-    const alo = await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id], modo: "ENTREGAR" });
+    const ram = await cadastrarComInspecao(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 8) });
+    await expect(criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [ram.id], modo: "ENTREGAR", verificacoes: await verificacoesNovas([ram.id]) })).rejects.toThrow(/não são alocados a pessoas/);
+    await expect(transferirColaborador(supervisor, { ativoId: ram.id, colaboradorId: pessoa.colaboradorId, modo: "ENTREGAR", alocacaoAtualId: null })).rejects.toThrow(/alocação ativa/);
+    const nb = await cadastrarComInspecao(supervisor, { dados: notebook(empresa.id, 5201) });
+    const alo = await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id], modo: "ENTREGAR", verificacoes: await verificacoesNovas([nb.id]) });
     await expect(prisma.itemAlocacao.create({ data: { alocacaoId: alo.id, ativoId: ram.id, empresaProprietariaId: empresa.id } })).rejects.toThrow(/não são alocados a pessoas/);
     await expect(enviarParaManutencao(supervisor, { ativoId: ram.id, motivo: "x", observacoes: "y" })).resolves.toBeTruthy(); // em estoque pode ir para manutenção
   });
 
   it("intervenção em notebook alocado exige confirmação e não encerra a alocação", async () => {
     const { empresa, supervisor, pessoa } = await cenario();
-    const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
-    const alo = await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id], modo: "ENTREGAR" });
-    const ram = await cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 16) });
+    const nb = await cadastrarComInspecao(supervisor, { dados: notebook(empresa.id) });
+    const alo = await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id], modo: "ENTREGAR", verificacoes: await verificacoesNovas([nb.id]) });
+    const ram = await cadastrarComInspecao(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 16) });
     await expect(instalarComponente(supervisor, { notebookId: nb.id, componenteId: ram.id })).rejects.toThrow(/Confirme que ele está disponível/);
     await instalarComponente(supervisor, { notebookId: nb.id, componenteId: ram.id, confirmacaoIntervencao: true, motivo: "Upgrade" });
     expect(await prisma.alocacao.findUniqueOrThrow({ where: { id: alo.id } })).toMatchObject({ estado: "ATIVA" });
@@ -254,9 +255,9 @@ describe("pessoas e notebook alocado", () => {
 describe("dados existentes e configuração original", () => {
   it("notebook antigo (só a ficha escrita): vincular soma à memória da ficha, sem criar peça a partir do texto", async () => {
     const { empresa, supervisor } = await cenario();
-    const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5301, null) });
+    const nb = await cadastrarComInspecao(supervisor, { dados: notebook(empresa.id, 5301, null) });
     await prisma.ativo.update({ where: { id: nb.id }, data: { memoriaRam: "8 GB", armazenamento: "SSD 256 GB" } }); // como os cadastros antigos
-    const ram = await cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 8) });
+    const ram = await cadastrarComInspecao(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 8) });
     // Edição sem a configuração não apaga o texto.
     await editarEquipamento(supervisor, { id: nb.id, dados: { ...notebook(empresa.id, 5301, null), modeloId: MODELO.latitude3540 } });
     expect(await ficha(nb.id)).toMatchObject({ memoriaRam: "8 GB", armazenamento: "SSD 256 GB", modelo: "Latitude 3540" });
@@ -281,12 +282,12 @@ describe("dados existentes e configuração original", () => {
 
   it("a configuração original se corrige pela edição até a primeira intervenção; depois, só pelos componentes", async () => {
     const { empresa, supervisor } = await cenario();
-    const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
+    const nb = await cadastrarComInspecao(supervisor, { dados: notebook(empresa.id) });
     const ajuste = { memoria: { capacidadeGb: 32, tecnologia: "DDR5" }, armazenamento: [{ tipo: "SSD", capacidadeGb: 1000, interfaceConexao: "NVMe/PCIe" }] };
     await editarEquipamento(supervisor, { id: nb.id, dados: notebook(empresa.id, 5001, ajuste) });
     expect(await ficha(nb.id)).toMatchObject({ memoriaRam: "32 GB DDR5", armazenamento: "SSD NVMe/PCIe 1 TB" });
     expect(await prisma.pecaConfiguracao.count({ where: { equipamentoId: nb.id } })).toBe(4); // 2 encerradas + 2 vigentes
-    const ram = await cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 8) });
+    const ram = await cadastrarComInspecao(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 8) });
     await instalarComponente(supervisor, { notebookId: nb.id, componenteId: ram.id });
     await expect(editarEquipamento(supervisor, { id: nb.id, dados: notebook(empresa.id, 5001, CONFIG) })).rejects.toThrow(/intervenções/);
   });
@@ -295,9 +296,9 @@ describe("dados existentes e configuração original", () => {
 describe("lista do inventário", () => {
   it("equipamentos e componentes em listas e números separados; filtros por capacidade e notebook", async () => {
     const { empresa, supervisor } = await cenario();
-    const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
-    const ram = await cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 16) });
-    await cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "SSD", 512) });
+    const nb = await cadastrarComInspecao(supervisor, { dados: notebook(empresa.id) });
+    const ram = await cadastrarComInspecao(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 16) });
+    await cadastrarComInspecao(supervisor, { dados: peca(empresa.id, "SSD", 512) });
     await instalarComponente(supervisor, { notebookId: nb.id, componenteId: ram.id });
 
     const equipamentos = await listarInventario(supervisor);
@@ -321,10 +322,10 @@ describe("lista do inventário", () => {
 describe("permissões", () => {
   it("colaborador comum não cadastra peças nem intervém; o Estagiário TI opera", async () => {
     const { empresa, supervisor, pessoa } = await cenario();
-    const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
-    const ram = await cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 8) });
+    const nb = await cadastrarComInspecao(supervisor, { dados: notebook(empresa.id) });
+    const ram = await cadastrarComInspecao(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 8) });
     const comum = await ator(pessoa.contaId);
-    await expect(cadastrarEquipamento(comum, { dados: peca(empresa.id, "SSD", 256) })).rejects.toBeInstanceOf(ErroAutorizacao);
+    await expect(cadastrarComInspecao(comum, { dados: peca(empresa.id, "SSD", 256) })).rejects.toBeInstanceOf(ErroAutorizacao);
     await expect(instalarComponente(comum, { notebookId: nb.id, componenteId: ram.id })).rejects.toBeInstanceOf(ErroAutorizacao);
     await expect(editarEquipamento(comum, { id: nb.id, dados: notebook(empresa.id, 5001, CONFIG) })).rejects.toBeInstanceOf(ErroAutorizacao);
     expect(await prisma.eventoAuditoria.count({ where: { resultado: "NEGADO", atorContaId: pessoa.contaId } })).toBeGreaterThanOrEqual(3);

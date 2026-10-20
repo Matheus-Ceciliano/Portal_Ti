@@ -16,6 +16,7 @@ import {
 } from "@/server/modulos/alocacoes";
 import type { FotoEnviada } from "@/server/modulos/inventario-base";
 import { registrarTerAssinado } from "@/server/modulos/termos";
+import { lerVerificacoes } from "./inspecao-formulario";
 
 type Falha = { ok: false; erro: string };
 export type ResultadoAlocacao = { ok: true; mensagem: string; id?: string } | Falha;
@@ -50,15 +51,19 @@ const esquemaNova = z.object({
   data: z.string().max(40).optional(),
   observacoes: z.string().max(1000).optional(),
   chaveRequisicao: z.uuid().optional(),
+  /** Entrega física: verificação técnica de cada equipamento (as fotos vêm em `anexos`). */
+  verificacoes: z.unknown().optional(),
 });
 
-export async function acaoCriarAlocacao(entrada: z.input<typeof esquemaNova>): Promise<ResultadoAlocacao> {
+export async function acaoCriarAlocacao(entrada: z.input<typeof esquemaNova>, anexos?: FormData): Promise<ResultadoAlocacao> {
   const ator = await atorAtual();
   if (!ator) return { ok: false, erro: SESSAO };
   const dados = esquemaNova.safeParse(entrada);
   if (!dados.success) return { ok: false, erro: dados.error.issues[0]?.message ?? "Revise os dados da alocação." };
   try {
-    const r = await criarAlocacao(ator, dados.data);
+    const verificacoes = await lerVerificacoes(dados.data.verificacoes, anexos);
+    if (!verificacoes) return { ok: false, erro: "Revise a verificação técnica dos equipamentos." };
+    const r = await criarAlocacao(ator, { ...dados.data, verificacoes });
     atualizarTelas();
     return {
       ok: true,
@@ -80,11 +85,14 @@ export async function acaoDetalheAlocacao(id: string): Promise<{ ok: true; dados
   }
 }
 
-export async function acaoConfirmarEntrega(alocacaoId: string, data?: string): Promise<ResultadoAlocacao> {
+/** Reserva → entrega física, com a verificação técnica de cada item (fotos das inspeções novas em `anexos`). */
+export async function acaoConfirmarEntrega(alocacaoId: string, data?: string, verificacoes?: unknown, anexos?: FormData): Promise<ResultadoAlocacao> {
   const ator = await atorAtual();
   if (!ator) return { ok: false, erro: SESSAO };
   try {
-    const r = await confirmarEntrega(ator, { alocacaoId, data });
+    const lidas = await lerVerificacoes(verificacoes, anexos);
+    if (!lidas) return { ok: false, erro: "Revise a verificação técnica dos equipamentos." };
+    const r = await confirmarEntrega(ator, { alocacaoId, data, verificacoes: lidas });
     atualizarTelas();
     return { ok: true, mensagem: `Entrega ${r.numero} confirmada.` };
   } catch (erro) {

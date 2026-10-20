@@ -63,7 +63,9 @@ test.describe("Supervisor TI", () => {
       await expect(painel).toBeHidden();
       await mais.click();
       await expect(painel).toBeVisible();
-      await page.getByRole("heading", { level: 1 }).click();
+      // Clique fora: no fim do título (a barra expandida cobre os primeiros 240 px por cima do conteúdo).
+      const titulo = (await page.getByRole("heading", { level: 1 }).boundingBox())!;
+      await page.mouse.click(titulo.x + titulo.width - 8, titulo.y + titulo.height / 2);
       await expect(painel).toBeHidden();
     }
 
@@ -76,6 +78,55 @@ test.describe("Supervisor TI", () => {
     await expect(painel.getByRole("link", { name: "TDV" })).toHaveAttribute("aria-current", "page");
     await painel.getByRole("link", { name: "Configurações" }).click();
     await expect(page.getByRole("heading", { name: "Atribuir perfil de TI" })).toBeVisible();
+  });
+
+  test("barra lateral recolhida por padrão: dica, expansão ao passar o mouse, Esc e fixação persistente", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/ti");
+    const barra = page.getByTestId("barra-lateral");
+    const conteudo = page.locator("#conteudo");
+    const fixar = page.getByTestId("fixar-menu");
+    const longe = () => page.mouse.move(1100, 600);
+    await expect(barra).toHaveAttribute("data-estado", "recolhida");
+    expect((await barra.boundingBox())!.width).toBe(72);
+    const inicio = (await conteudo.boundingBox())!.x;
+
+    // Recolhida: o nome do módulo aparece em dica (teclado).
+    await barra.getByRole("link", { name: /^Inventário/ }).focus();
+    await expect(page.getByRole("tooltip", { name: "Inventário" })).toBeVisible();
+
+    // Mouse: expande por cima do conteúdo (que não se move) e recolhe ao sair; Esc recolhe.
+    await barra.getByRole("link", { name: /^Alocações/ }).hover();
+    await expect(barra).toHaveAttribute("data-estado", "expandida");
+    expect((await conteudo.boundingBox())!.x).toBe(inicio);
+    await longe();
+    await expect(barra).toHaveAttribute("data-estado", "recolhida");
+    await barra.getByRole("link", { name: /^Alocações/ }).hover();
+    await expect(barra).toHaveAttribute("data-estado", "expandida");
+    await page.keyboard.press("Escape");
+    await expect(barra).toHaveAttribute("data-estado", "recolhida");
+    await longe();
+
+    // Fixada: continua expandida, ocupa espaço e persiste ao recarregar.
+    await barra.getByRole("link", { name: /^Dashboard/ }).hover();
+    await expect(fixar).toBeVisible();
+    await fixar.click();
+    await expect(fixar).toHaveAttribute("aria-pressed", "true");
+    await longe();
+    await page.waitForTimeout(400);
+    await expect(barra).toHaveAttribute("data-estado", "expandida");
+    expect((await conteudo.boundingBox())!.x).toBeGreaterThan(inicio);
+    await page.reload();
+    await expect(barra).toHaveAttribute("data-estado", "expandida");
+    await expect(page.getByTestId("fixar-menu")).toHaveAttribute("aria-label", "Desafixar menu lateral");
+
+    // Desafixada: volta a recolher quando o mouse sai, também depois de recarregar.
+    await page.getByTestId("fixar-menu").click();
+    await longe();
+    await expect(barra).toHaveAttribute("data-estado", "recolhida");
+    await page.reload();
+    await expect(barra).toHaveAttribute("data-estado", "recolhida");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(1440);
   });
 
   test("tema escuro aplica e persiste após recarregar", async ({ page }) => {

@@ -17,6 +17,8 @@ import {
 } from "@/server/modulos/inventario";
 import type { FotoEnviada } from "@/server/modulos/inventario-base";
 import { concluirManutencao, enviarParaManutencao } from "@/server/modulos/manutencoes";
+import type { EntradaInspecao } from "@/server/modulos/inspecoes";
+import { lerInspecao } from "./inspecao-formulario";
 
 export type EstadoInventario = {
   ok?: boolean;
@@ -142,7 +144,23 @@ export async function acaoSalvarEquipamento(_a: EstadoInventario, formData: Form
       return { ok: true, id, mensagem: "Cadastro do equipamento atualizado." };
     }
     const fotosPartes = Object.fromEntries(await Promise.all(partes.map(async (p) => [p, await fotosDoFormulario(formData, undefined, `${p}_`)] as const)));
-    const r = await cadastrarEquipamento(ator, { dados, fotos, fotosPartes, chaveRequisicao: texto(formData, "chaveRequisicao") });
+    // Inspeção de entrada de cada equipamento criado ("principal", "carregador" ou a peça do kit).
+    const brutas = lerJson(texto(formData, "inspecoes"));
+    const inspecoes: Record<string, EntradaInspecao> = {};
+    if (brutas && typeof brutas === "object") {
+      for (const [alvo, valor] of Object.entries(brutas).slice(0, 4)) {
+        const lida = await lerInspecao(valor, formData, alvo);
+        if (lida) inspecoes[alvo] = lida;
+      }
+    }
+    const r = await cadastrarEquipamento(ator, {
+      dados,
+      fotos,
+      fotosPartes,
+      chaveRequisicao: texto(formData, "chaveRequisicao"),
+      condicaoEntrada: texto(formData, "condicaoEntrada") || null,
+      inspecoes,
+    });
     atualizarTelas(r.id);
     // O identificador definitivo vem do banco (a prévia do formulário não reserva número).
     const mensagem = r.pecas.length
@@ -150,9 +168,13 @@ export async function acaoSalvarEquipamento(_a: EstadoInventario, formData: Form
       : r.nome
         ? `${r.nome} cadastrado${r.carregador ? ` com o carregador ${r.carregador}` : ""}.`
         : "Equipamento cadastrado.";
-    return { ok: true, id: r.id, mensagem };
+    const aviso = r.emManutencao.length ? ` Defeito bloqueante na inspeção: ${r.emManutencao.join(", ")} em manutenção.` : "";
+    return { ok: true, id: r.id, mensagem: mensagem + aviso };
   } catch (erro) {
     const mensagem = mensagemDeErro(erro);
+    // Erros da inspeção ficam na revisão; o da condição de entrada, no campo dela.
+    if (/condição de entrada/i.test(mensagem)) return { erros: { condicaoEntrada: mensagem } };
+    if (/^Inspeção/.test(mensagem)) return { erros: { inspecao: mensagem } };
     const campo = campoDoErro(mensagem);
     return campo ? { erros: { [campo]: mensagem } } : { erro: mensagem };
   }

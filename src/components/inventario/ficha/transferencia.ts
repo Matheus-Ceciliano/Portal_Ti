@@ -10,8 +10,9 @@ export function paraTransferencia(ficha: FichaEquipamento): EquipamentoTransfere
     descricao: `${ficha.rotuloTipo} · ${ficha.marca} ${ficha.modelo}`,
     empresa: ficha.empresa,
     responsavel: ficha.responsavel
-      ? { id: ficha.responsavel.id, nome: ficha.responsavel.nome, alocacao: ficha.responsavel.alocacao, alocacaoId: ficha.responsavel.alocacaoId }
+      ? { id: ficha.responsavel.id, nome: ficha.responsavel.nome, alocacao: ficha.responsavel.alocacao, alocacaoId: ficha.responsavel.alocacaoId, empresa: ficha.responsavel.empresa }
       : null,
+    empresaAutorizada: ficha.aluguel?.empresa ?? ficha.empresa,
     carregadores: ficha.carregadores.filter((c) => !c.desvinculadoEm).map((c) => ({ id: c.id, nome: c.nome, patrimonio: c.patrimonio, situacao: c.situacao })),
   };
 }

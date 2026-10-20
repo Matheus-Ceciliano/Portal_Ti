@@ -52,31 +52,34 @@ model Instalacao {
 }
 
 model Empresa {
-  id             String         @id @default(uuid())
+  id                String               @id @default(uuid())
   /// Razão social.
-  nome           String         @unique
+  nome              String               @unique
   /// Nome curto ou sigla usada no dia a dia.
-  sigla          String         @unique
+  sigla             String               @unique
   /// Nome curto usado na senha inicial de ativação (ex.: Virta, Arvos, Preserve). Não é a sigla.
-  nomeCurtoSenha String?        @map("nome_curto_senha")
+  nomeCurtoSenha    String?              @map("nome_curto_senha")
   /// CNPJ canônico: 14 caracteres maiúsculos sem pontuação (aceita o formato alfanumérico).
-  cnpj           String         @unique
-  cidade         String
-  ativa          Boolean        @default(true)
+  cnpj              String               @unique
+  cidade            String
+  ativa             Boolean              @default(true)
   /// Nome da pessoa responsável pela empresa (texto livre; não é vínculo de colaborador).
-  responsavel    String?
-  observacoes    String?
+  responsavel       String?
+  observacoes       String?
   /// Chave do logotipo no armazenamento privado; nunca é um caminho do sistema de arquivos.
-  logoChave      String?        @map("logo_chave")
-  logoTipo       String?        @map("logo_tipo")
-  criadoEm       DateTime       @default(now()) @map("criado_em")
-  atualizadoEm   DateTime       @default(now()) @updatedAt @map("atualizado_em")
-  colaboradores  Colaborador[]
+  logoChave         String?              @map("logo_chave")
+  logoTipo          String?              @map("logo_tipo")
+  criadoEm          DateTime             @default(now()) @map("criado_em")
+  atualizadoEm      DateTime             @default(now()) @updatedAt @map("atualizado_em")
+  colaboradores     Colaborador[]
   /// Equipamentos de que a empresa é proprietária.
-  ativos         Ativo[]
+  ativos            Ativo[]
   /// Alocações a colaboradores da empresa (instantâneo do vínculo na data da alocação).
-  alocacoes      Alocacao[]
-  itensProprios  ItemAlocacao[]
+  alocacoes         Alocacao[]
+  itensProprios     ItemAlocacao[]
+  /// Aluguéis entre empresas: equipamentos cedidos (como proprietária) e recebidos (como locatária).
+  alugueisCedidos   AluguelEquipamento[] @relation("AlugueisCedidos")
+  alugueisRecebidos AluguelEquipamento[] @relation("AlugueisRecebidos")
 
   @@map("empresa")
 }
@@ -418,6 +421,8 @@ model Ativo {
   observacoes          String?
   situacao             SituacaoAtivo               @default(DISPONIVEL)
   situacaoDesde        DateTime                    @default(now()) @map("situacao_desde")
+  /// Condição na entrada no inventário (define a inspeção de entrada); nula nos cadastros anteriores.
+  condicaoEntrada      CondicaoEntrada?            @map("condicao_entrada")
   /// Carregador: notebook a que pertence e posição na sequência (C1, C2...).
   notebookId           String?                     @map("notebook_id")
   notebook             Ativo?                      @relation("Carregadores", fields: [notebookId], references: [id])
@@ -436,6 +441,9 @@ model Ativo {
   itensAlocacao        ItemAlocacao[]
   manutencoes          Manutencao[]
   transferencias       Transferencia[]
+  alugueis             AluguelEquipamento[]
+  inspecoes            InspecaoTecnica[]
+  verificacoesEntrega  VerificacaoEntrega[]
   /// Notebook: peças da configuração (original e componentes instalados) e intervenções.
   pecasConfiguracao    PecaConfiguracao[]          @relation("PecasEquipamento")
   intervencoes         IntervencaoConfiguracao[]
@@ -498,6 +506,9 @@ model CategoriaEquipamento {
   prefixos      HistoricoPrefixoCategoria[]
   modelos       ModeloEquipamento[]
   sistemas      SistemaOperacionalCategoria[]
+
+  /// Checklist de inspeção da categoria (perguntas configuradas pela TI).
+  perguntasInspecao PerguntaInspecao[]
 
   @@map("categoria_equipamento")
 }
@@ -668,29 +679,36 @@ enum ContextoFoto {
   MANUTENCAO
   CONCLUSAO_MANUTENCAO
   DEVOLUCAO
+  INSPECAO
 }
 
 /// Foto no armazenamento privado (nunca no banco). Fotos de eventos passados não são substituídas.
 model FotoAtivo {
-  id              String         @id @default(uuid())
-  ativoId         String         @map("ativo_id")
-  ativo           Ativo          @relation(fields: [ativoId], references: [id])
+  id              String            @id @default(uuid())
+  ativoId         String            @map("ativo_id")
+  ativo           Ativo             @relation(fields: [ativoId], references: [id])
   contexto        ContextoFoto
   tipo            TipoFoto
-  chave           String         @unique
+  chave           String            @unique
   mime            String
   tamanho         Int
-  manutencaoId    String?        @map("manutencao_id")
-  manutencao      Manutencao?    @relation(fields: [manutencaoId], references: [id])
-  itemDevolucaoId String?        @map("item_devolucao_id")
-  itemDevolucao   ItemDevolucao? @relation(fields: [itemDevolucaoId], references: [id])
-  enviadaPorNome  String         @map("enviada_por_nome")
-  enviadaEm       DateTime       @default(now()) @map("enviada_em")
+  manutencaoId    String?           @map("manutencao_id")
+  manutencao      Manutencao?       @relation(fields: [manutencaoId], references: [id])
+  itemDevolucaoId String?           @map("item_devolucao_id")
+  itemDevolucao   ItemDevolucao?    @relation(fields: [itemDevolucaoId], references: [id])
+  /// Evidência de uma inspeção técnica (e da pergunta, quando anexada a ela).
+  inspecaoId      String?           @map("inspecao_id")
+  inspecao        InspecaoTecnica?  @relation(fields: [inspecaoId], references: [id])
+  respostaId      String?           @map("resposta_id")
+  resposta        RespostaInspecao? @relation(fields: [respostaId], references: [id])
+  enviadaPorNome  String            @map("enviada_por_nome")
+  enviadaEm       DateTime          @default(now()) @map("enviada_em")
   /// Foto do cadastro retirada na edição: some das galerias, mas o arquivo e o registro ficam.
-  removidaEm      DateTime?      @map("removida_em")
-  removidaPorNome String?        @map("removida_por_nome")
+  removidaEm      DateTime?         @map("removida_em")
+  removidaPorNome String?           @map("removida_por_nome")
 
   @@index([ativoId])
+  @@index([inspecaoId])
   @@map("foto_ativo")
 }
 
@@ -712,6 +730,8 @@ enum TipoMovimentacao {
   COMPONENTE_INSTALADO
   COMPONENTE_REMOVIDO
   COMPONENTE_SUBSTITUIDO
+  ALUGUEL_INICIADO
+  ALUGUEL_ENCERRADO
 }
 
 /// Livro-razão de cada equipamento: somente inserção.
@@ -747,37 +767,39 @@ enum EstadoAlocacao {
 }
 
 model Alocacao {
-  id                   String         @id @default(uuid())
+  id                   String               @id @default(uuid())
   /// Número legível: AL0001, AL0002... (sequência única, sem reinício anual). As anteriores
   /// mantêm o formato antigo (ALO-AAAA-NNNN) até haver migração específica autorizada.
-  numero               String         @unique
-  colaboradorId        String         @map("colaborador_id")
-  colaborador          Colaborador    @relation(fields: [colaboradorId], references: [id])
+  numero               String               @unique
+  colaboradorId        String               @map("colaborador_id")
+  colaborador          Colaborador          @relation(fields: [colaboradorId], references: [id])
   /// Empresa do colaborador na data da alocação. A proprietária de cada equipamento fica no item.
-  empresaColaboradorId String         @map("empresa_colaborador_id")
-  empresaColaborador   Empresa        @relation(fields: [empresaColaboradorId], references: [id])
+  empresaColaboradorId String               @map("empresa_colaborador_id")
+  empresaColaborador   Empresa              @relation(fields: [empresaColaboradorId], references: [id])
   estado               EstadoAlocacao
   /// Reserva: data prevista da entrega.
-  previstaPara         DateTime?      @map("prevista_para") @db.Date
+  previstaPara         DateTime?            @map("prevista_para") @db.Date
   /// Entrega física (obrigatória a partir de ATIVA).
-  entregueEm           DateTime?      @map("entregue_em")
-  entreguePorNome      String?        @map("entregue_por_nome")
+  entregueEm           DateTime?            @map("entregue_em")
+  entreguePorNome      String?              @map("entregue_por_nome")
   observacoes          String?
-  chaveRequisicao      String?        @unique @map("chave_requisicao")
+  chaveRequisicao      String?              @unique @map("chave_requisicao")
   /// Responsável TI escolhido na alocação (membro da TI ativo e autorizado); nulo nas anteriores.
-  responsavelTiContaId String?        @map("responsavel_ti_conta_id")
-  responsavelTi        ContaAcesso?   @relation("ResponsavelTiAlocacao", fields: [responsavelTiContaId], references: [id])
-  responsavelTiNome    String?        @map("responsavel_ti_nome")
+  responsavelTiContaId String?              @map("responsavel_ti_conta_id")
+  responsavelTi        ContaAcesso?         @relation("ResponsavelTiAlocacao", fields: [responsavelTiContaId], references: [id])
+  responsavelTiNome    String?              @map("responsavel_ti_nome")
   /// Quem registrou a operação no portal (pode ser diferente do responsável TI).
-  criadaPorContaId     String?        @map("criada_por_conta_id")
-  criadaPorNome        String         @map("criada_por_nome")
-  criadaEm             DateTime       @default(now()) @map("criada_em")
-  atualizadaEm         DateTime       @default(now()) @updatedAt @map("atualizada_em")
-  canceladaEm          DateTime?      @map("cancelada_em")
-  motivoCancelamento   String?        @map("motivo_cancelamento")
+  criadaPorContaId     String?              @map("criada_por_conta_id")
+  criadaPorNome        String               @map("criada_por_nome")
+  criadaEm             DateTime             @default(now()) @map("criada_em")
+  atualizadaEm         DateTime             @default(now()) @updatedAt @map("atualizada_em")
+  canceladaEm          DateTime?            @map("cancelada_em")
+  motivoCancelamento   String?              @map("motivo_cancelamento")
   itens                ItemAlocacao[]
   devolucoes           Devolucao[]
   termos               Termo[]
+  inspecoes            InspecaoTecnica[]
+  verificacoes         VerificacaoEntrega[]
 
   @@index([colaboradorId])
   @@index([estado])
@@ -810,6 +832,8 @@ model ItemAlocacao {
   encerradoPorNome      String?                 @map("encerrado_por_nome")
   manutencaoId          String?                 @map("manutencao_id")
   itemDevolucao         ItemDevolucao?
+  /// Condição verificada na entrega física (instantâneo imutável para o TER).
+  verificacaoEntrega    VerificacaoEntrega?
 
   @@unique([ativoId, aberto])
   @@index([alocacaoId])
@@ -850,6 +874,7 @@ model Devolucao {
   criadaEm        DateTime             @default(now()) @map("criada_em")
   itens           ItemDevolucao[]
   termos          Termo[]
+  inspecoes       InspecaoTecnica[]
 
   @@index([alocacaoId])
   @@map("devolucao")
@@ -920,6 +945,41 @@ model Transferencia {
   @@unique([ativoId, pendente])
   @@index([ativoId, criadaEm])
   @@map("transferencia")
+}
+
+/// Aluguel do equipamento a outra empresa do grupo. A propriedade não muda; enquanto o aluguel
+/// vale, só colaboradores da empresa locatária recebem o equipamento (e os carregadores
+/// vinculados, da mesma dona). A data prevista de devolução é só um prazo: o aluguel termina
+/// pelo encerramento registrado, nunca sozinho.
+model AluguelEquipamento {
+  id                    String    @id @default(uuid())
+  ativoId               String    @map("ativo_id")
+  ativo                 Ativo     @relation(fields: [ativoId], references: [id])
+  /// Proprietária no início do aluguel (a propriedade não muda enquanto ele vale).
+  empresaProprietariaId String    @map("empresa_proprietaria_id")
+  empresaProprietaria   Empresa   @relation("AlugueisCedidos", fields: [empresaProprietariaId], references: [id])
+  empresaLocatariaId    String    @map("empresa_locataria_id")
+  empresaLocataria      Empresa   @relation("AlugueisRecebidos", fields: [empresaLocatariaId], references: [id])
+  inicio                DateTime  @db.Date
+  devolucaoPrevista     DateTime? @map("devolucao_prevista") @db.Date
+  motivo                String
+  observacoes           String?
+  /// true enquanto vigente e nulo depois: o índice único impede dois aluguéis vigentes do mesmo equipamento.
+  vigente               Boolean?  @default(true)
+  registradoEm          DateTime  @default(now()) @map("registrado_em")
+  registradoPorContaId  String?   @map("registrado_por_conta_id")
+  registradoPorNome     String    @map("registrado_por_nome")
+  encerradoEm           DateTime? @map("encerrado_em")
+  encerradoPorContaId   String?   @map("encerrado_por_conta_id")
+  encerradoPorNome      String?   @map("encerrado_por_nome")
+  motivoEncerramento    String?   @map("motivo_encerramento")
+  /// O mesmo envio repetido devolve o aluguel já registrado.
+  chaveRequisicao       String?   @unique @map("chave_requisicao")
+
+  @@unique([ativoId, vigente])
+  @@index([empresaLocatariaId, vigente])
+  @@index([ativoId, inicio])
+  @@map("aluguel_equipamento")
 }
 
 enum TipoComponente {
@@ -1076,4 +1136,209 @@ model ContadorDocumento {
   valor Int
 
   @@map("contador_documento")
+}
+
+/**
+ * Inspeções técnicas: questionários versionados por categoria, inspeções de entrada,
+ * devolução e pré-alocação (nunca sobrescritas) e a verificação de cada item na entrega física.
+ */
+
+/// Condição do equipamento na entrada: o novo não passa pelos testes que só valem para usados.
+enum CondicaoEntrada {
+  NOVO
+  USADO
+}
+
+enum TipoInspecao {
+  ENTRADA
+  DEVOLUCAO
+  PRE_ALOCACAO
+}
+
+/// PENDENTE = aberta na entrada em avaliação, aguardando a TI; CANCELADA = o equipamento saiu da avaliação por outro caminho.
+enum EstadoInspecao {
+  PENDENTE
+  CONCLUIDA
+  CANCELADA
+}
+
+/// Calculado das respostas no servidor: não conforme em item bloqueante = INAPTO.
+enum ResultadoInspecao {
+  APTO
+  APTO_COM_RESSALVAS
+  INAPTO
+}
+
+enum RespostaChecklist {
+  CONFORME
+  NAO_CONFORME
+  NAO_TESTADO
+  NAO_SE_APLICA
+}
+
+enum ModoVerificacaoEntrega {
+  /// As condições continuam iguais às da última inspeção.
+  CONFIRMOU_ULTIMA
+  /// Nova inspeção feita na alocação.
+  NOVA_INSPECAO
+}
+
+/// Versão fixa de questionário da primeira etapa (antes do checklist configurável). Só histórico:
+/// as inspeções novas apontam, em cada resposta, para a versão da pergunta exibida.
+model QuestionarioInspecao {
+  id        String            @id @default(uuid())
+  codigo    String
+  versao    Int
+  titulo    String
+  /// Perguntas da versão com as orientações (como testar, resultado esperado, sinais de problema).
+  perguntas Json
+  /// SHA-256 da definição: a mesma versão nunca muda de conteúdo.
+  hash      String
+  criadoEm  DateTime          @default(now()) @map("criado_em")
+  inspecoes InspecaoTecnica[]
+
+  @@unique([codigo, versao])
+  @@map("questionario_inspecao")
+}
+
+/// Inspeção técnica de um equipamento. Concluída, não muda nem é excluída; a seguinte é sempre outra linha.
+/// "pendente" é true enquanto aguarda a TI e nulo depois: uma só pendente por equipamento.
+model InspecaoTecnica {
+  id                 String                @id @default(uuid())
+  /// Número legível (INS-AAAA-NNNN), atribuído na conclusão.
+  numero             String?               @unique
+  ativoId            String                @map("ativo_id")
+  ativo              Ativo                 @relation(fields: [ativoId], references: [id])
+  tipo               TipoInspecao
+  estado             EstadoInspecao
+  pendente           Boolean?              @default(true)
+  /// Categoria e questionário usados (instantâneo na conclusão).
+  categoria          CategoriaAtivo?
+  categoriaNome      String?               @map("categoria_nome")
+  questionarioId     String?               @map("questionario_id")
+  questionario       QuestionarioInspecao? @relation(fields: [questionarioId], references: [id])
+  condicaoEntrada    CondicaoEntrada?      @map("condicao_entrada")
+  resultado          ResultadoInspecao?
+  observacoes        String?
+  devolucaoId        String?               @map("devolucao_id")
+  devolucao          Devolucao?            @relation(fields: [devolucaoId], references: [id])
+  alocacaoId         String?               @map("alocacao_id")
+  alocacao           Alocacao?             @relation(fields: [alocacaoId], references: [id])
+  abertaEm           DateTime              @default(now()) @map("aberta_em")
+  abertaPorNome      String                @map("aberta_por_nome")
+  motivoAbertura     String?               @map("motivo_abertura")
+  concluidaEm        DateTime?             @map("concluida_em")
+  /// Membro da TI que fez a inspeção.
+  responsavelContaId String?               @map("responsavel_conta_id")
+  responsavelNome    String?               @map("responsavel_nome")
+  canceladaEm        DateTime?             @map("cancelada_em")
+  motivoCancelamento String?               @map("motivo_cancelamento")
+  respostas          RespostaInspecao[]
+  fotos              FotoAtivo[]
+  verificacoes       VerificacaoEntrega[]
+
+  @@unique([ativoId, pendente])
+  @@index([ativoId, concluidaEm])
+  @@map("inspecao_tecnica")
+}
+
+/// Resposta a uma pergunta, com o texto da pergunta como foi exibido (instantâneo). Somente inserção.
+/// "chave" é o id da pergunta (estável entre versões); a versão exibida fica em versaoPerguntaId.
+model RespostaInspecao {
+  id               String                  @id @default(uuid())
+  inspecaoId       String                  @map("inspecao_id")
+  inspecao         InspecaoTecnica         @relation(fields: [inspecaoId], references: [id])
+  versaoPerguntaId String?                 @map("versao_pergunta_id")
+  versaoPergunta   VersaoPerguntaInspecao? @relation(fields: [versaoPerguntaId], references: [id], onDelete: Restrict)
+  chave            String
+  ordem            Int
+  grupo            String
+  pergunta         String
+  bloqueante       Boolean
+  /// Verificação normalmente aplicável: "Não se aplica" exige justificativa.
+  obrigatoria      Boolean
+  resposta         RespostaChecklist
+  justificativa    String?
+  observacao       String?
+  fotos            FotoAtivo[]
+
+  @@unique([inspecaoId, chave])
+  @@map("resposta_inspecao")
+}
+
+/// Verificação técnica de um item na entrega física: aponta a inspeção usada e guarda o instantâneo
+/// (identificação, versão do questionário, perguntas e respostas confirmadas) para o TER. Imutável.
+model VerificacaoEntrega {
+  id                 String                 @id @default(uuid())
+  itemAlocacaoId     String                 @unique @map("item_alocacao_id")
+  itemAlocacao       ItemAlocacao           @relation(fields: [itemAlocacaoId], references: [id])
+  alocacaoId         String                 @map("alocacao_id")
+  alocacao           Alocacao               @relation(fields: [alocacaoId], references: [id])
+  ativoId            String                 @map("ativo_id")
+  ativo              Ativo                  @relation(fields: [ativoId], references: [id])
+  inspecaoId         String                 @map("inspecao_id")
+  inspecao           InspecaoTecnica        @relation(fields: [inspecaoId], references: [id])
+  modo               ModoVerificacaoEntrega
+  instantaneo        Json
+  verificadaEm       DateTime               @map("verificada_em")
+  responsavelContaId String                 @map("responsavel_conta_id")
+  responsavelNome    String                 @map("responsavel_nome")
+
+  @@index([alocacaoId])
+  @@index([inspecaoId])
+  @@map("verificacao_entrega")
+}
+
+/// Quando a pergunta vale: em todas as inspeções, fora da entrada de equipamento novo (testes de
+/// usado) ou só depois do cadastro (ex.: etiqueta do portal, que nasce no cadastro).
+enum AplicacaoPergunta {
+  SEMPRE
+  EXCETO_ENTRADA_NOVO
+  APOS_CADASTRO
+}
+
+/// Pergunta do checklist de uma categoria, configurada pela TI. Ordem e situação mudam aqui;
+/// o conteúdo (texto, orientações e regras) muda só por nova versão.
+model PerguntaInspecao {
+  id            String                   @id @default(uuid())
+  /// Perguntas do checklist inicial (ex.: "MONITOR:mn.tela"); as criadas pela TI não têm.
+  codigo        String?                  @unique
+  categoriaId   String                   @map("categoria_id")
+  categoria     CategoriaEquipamento     @relation(fields: [categoriaId], references: [id], onDelete: Restrict)
+  ordem         Int
+  ativa         Boolean                  @default(true)
+  criadaEm      DateTime                 @default(now()) @map("criada_em")
+  criadaPorNome String                   @map("criada_por_nome")
+  atualizadaEm  DateTime                 @default(now()) @updatedAt @map("atualizada_em")
+  versoes       VersaoPerguntaInspecao[]
+
+  @@index([categoriaId, ordem])
+  @@map("pergunta_inspecao")
+}
+
+/// Conteúdo de uma pergunta em uma versão. Não muda depois de gravado: editar cria a próxima
+/// versão e as respostas antigas continuam apontando para a delas.
+model VersaoPerguntaInspecao {
+  id                String             @id @default(uuid())
+  perguntaId        String             @map("pergunta_id")
+  pergunta          PerguntaInspecao   @relation(fields: [perguntaId], references: [id], onDelete: Restrict)
+  versao            Int
+  grupo             String
+  texto             String
+  comoTestar        String             @map("como_testar")
+  resultadoEsperado String             @map("resultado_esperado")
+  sinaisProblema    String             @map("sinais_problema")
+  /// Obrigatória: precisa de resposta explícita; "Não se aplica" pede justificativa.
+  obrigatoria       Boolean
+  /// "Não conforme" aqui é defeito bloqueante (impede aprovação, liberação e entrega).
+  bloqueante        Boolean
+  aplicacao         AplicacaoPergunta
+  /// Kit: peças a que a pergunta se aplica (vazio = todas).
+  partes            ParteKit[]
+  criadaEm          DateTime           @default(now()) @map("criada_em")
+  criadaPorNome     String             @map("criada_por_nome")
+  respostas         RespostaInspecao[]
+
+  @@unique([perguntaId, versao])
+  @@map("versao_pergunta_inspecao")
 }

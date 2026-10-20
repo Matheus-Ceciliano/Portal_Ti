@@ -42,6 +42,8 @@ type OpcoesPessoa = {
   situacaoConta?: "ATIVA" | "BLOQUEADA" | "DESATIVADA";
   /** O colaborador `id` já existe (ex.: pessoa do cenário fictício): cria só a conta. */
   colaboradorExistente?: boolean;
+  /** Empresa do colaborador (padrão: uma empresa nova só dele). */
+  empresaId?: string;
 };
 
 /** Cria colaborador + conta com credencial. "ativada" simula senha pessoal e ativação de TI concluídas. */
@@ -58,7 +60,7 @@ export async function criarPessoa(opcoes: OpcoesPessoa = {}) {
           emailCorporativo: `pessoa.${id.slice(0, 8)}@vallur.test`,
           cargo: "Analista",
           departamento: "TI",
-          empresaId: (await criarEmpresa()).id,
+          empresaId: opcoes.empresaId ?? (await criarEmpresa()).id,
         },
       });
   const email = colaborador.emailCorporativo;

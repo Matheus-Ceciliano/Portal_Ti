@@ -9,11 +9,12 @@ import { carregarAtor, type Ator } from "@/server/authz/ator";
 import { ErroAutorizacao } from "@/server/authz/exigir";
 import { prisma } from "@/server/db";
 import { criarAlocacao, registrarDevolucao } from "@/server/modulos/alocacoes";
-import { adicionarCarregador, cadastrarEquipamento, type DadosEquipamento } from "@/server/modulos/inventario";
+import { adicionarCarregador, type DadosEquipamento } from "@/server/modulos/inventario";
 import { concluirManutencao, enviarParaManutencao } from "@/server/modulos/manutencoes";
 import { cancelarTransferencia, confirmarTransferencia, transferirColaborador, transferirEmpresa } from "@/server/modulos/transferencias";
 import { MARCA, MODELO, PROCESSADOR } from "../apoio/catalogo";
 import { criarEmpresa, criarPessoa, limparBanco } from "../apoio/fabricas";
+import { cadastrarComInspecao, verificacoesNovas } from "../apoio/inspecao";
 
 async function ator(contaId: string): Promise<Ator> {
   const a = await carregarAtor(prisma, contaId, { mfaVerificado: true });
@@ -36,17 +37,18 @@ async function cenario() {
   const empresa = await criarEmpresa();
   const outra = await criarEmpresa();
   const supervisor = await ator((await criarPessoa({ perfis: ["SUPERVISOR_TI"], ativada: true })).contaId);
-  const ana = await criarPessoa({ ativada: true });
-  const bruno = await criarPessoa({ ativada: true });
-  const carla = await criarPessoa({ ativada: true });
+  // Colaboradores da empresa dos equipamentos (uso por outra empresa exige transferência ou aluguel).
+  const ana = await criarPessoa({ ativada: true, empresaId: empresa.id });
+  const bruno = await criarPessoa({ ativada: true, empresaId: empresa.id });
+  const carla = await criarPessoa({ ativada: true, empresaId: empresa.id });
   return { empresa, outra, supervisor, ana, bruno, carla };
 }
 
 /** Notebook com o C1, entregue (os dois na mesma alocação). */
 async function entregue(supervisor: Ator, empresaId: string, colaboradorId: string, n = 5001) {
-  const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresaId, n) });
+  const nb = await cadastrarComInspecao(supervisor, { dados: notebook(empresaId, n) });
   const c1 = await prisma.ativo.findFirstOrThrow({ where: { notebookId: nb.id } });
-  const alo = await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId, ativoIds: [nb.id, c1.id], modo: "ENTREGAR" });
+  const alo = await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId, ativoIds: [nb.id, c1.id], modo: "ENTREGAR", verificacoes: await verificacoesNovas([nb.id, c1.id]) });
   return { nb, c1, alo };
 }
 
@@ -178,22 +180,22 @@ describe("transferência entre colaboradores", () => {
     expect((await prisma.transferencia.findFirstOrThrow({ where: { ativoId: segundo.nb.id } })).estado).toBe("CANCELADA");
   });
 
-  it("em manutenção, baixado, reservado e em avaliação não são transferidos de colaborador; carregador vinculado também não", async () => {
+  it("só se transfere de colaborador a partir de alocação ativa; reservado e carregador vinculado também não", async () => {
     const { empresa, outra, supervisor, ana, bruno } = await cenario();
-    const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
+    const nb = await cadastrarComInspecao(supervisor, { dados: notebook(empresa.id) });
     const m = await enviarParaManutencao(supervisor, { ativoId: nb.id, motivo: "Teclado", observacoes: "Teclas falhando" });
     const estoque = { ativoId: nb.id, colaboradorId: bruno.colaboradorId, modo: "ENTREGAR" as const, alocacaoAtualId: null };
-    await expect(transferirColaborador(supervisor, estoque)).rejects.toThrow(/em manutenção/);
+    await expect(transferirColaborador(supervisor, estoque)).rejects.toThrow(/alocação ativa/);
     // A propriedade pode mudar durante a manutenção; só o baixado é bloqueado.
     await transferirEmpresa(supervisor, { ativoId: nb.id, empresaDestinoId: outra.id, motivo: "Rateio", confirmacao: true, empresaAtualId: empresa.id });
     await concluirManutencao(supervisor, { manutencaoId: m.id, resultado: "SEM_REPARO", servicoRealizado: "Placa sem conserto" });
     expect((await ativo(nb.id)).situacao).toBe("BAIXADO");
-    await expect(transferirColaborador(supervisor, estoque)).rejects.toThrow(/baixado/);
+    await expect(transferirColaborador(supervisor, estoque)).rejects.toThrow(/alocação ativa/);
     await expect(transferirEmpresa(supervisor, { ativoId: nb.id, empresaDestinoId: empresa.id, motivo: "Volta", confirmacao: true, empresaAtualId: outra.id })).rejects.toThrow(/baixado/);
 
-    const reservado = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5002) });
-    await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: ana.colaboradorId, ativoIds: [reservado.id], modo: "RESERVAR" });
-    await expect(transferirColaborador(supervisor, { ...estoque, ativoId: reservado.id })).rejects.toThrow(/reservado/i);
+    const reservado = await cadastrarComInspecao(supervisor, { dados: notebook(empresa.id, 5002) });
+    const reserva = await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: ana.colaboradorId, ativoIds: [reservado.id], modo: "RESERVAR" });
+    await expect(transferirColaborador(supervisor, { ...estoque, ativoId: reservado.id, alocacaoAtualId: reserva.id, confirmacaoFisica: true })).rejects.toThrow(/reservado/i);
 
     const { c1, alo } = await entregue(supervisor, empresa.id, ana.colaboradorId, 5003);
     await expect(
@@ -202,15 +204,14 @@ describe("transferência entre colaboradores", () => {
     await expect(transferirEmpresa(supervisor, { ativoId: c1.id, empresaDestinoId: outra.id, motivo: "x", confirmacao: true, empresaAtualId: empresa.id })).rejects.toThrow(/acompanha o notebook/);
   });
 
-  it("em estoque: vira uma nova alocação, com o carregador disponível junto", async () => {
+  it("em estoque não há transferência: a entrega é uma nova alocação", async () => {
     const { empresa, supervisor, bruno } = await cenario();
-    const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
-    const r = await transferirColaborador(supervisor, { ativoId: nb.id, colaboradorId: bruno.colaboradorId, modo: "ENTREGAR", alocacaoAtualId: null });
-    expect(r.resultado).toBe("ALOCADO");
-    const [item] = await abertos(nb.id);
-    expect(item.alocacao).toMatchObject({ numero: r.numero, colaboradorId: bruno.colaboradorId, estado: "ATIVA" });
-    const c1 = await prisma.ativo.findFirstOrThrow({ where: { notebookId: nb.id } });
-    expect((await abertos(c1.id))[0].alocacaoId).toBe(item.alocacaoId);
+    const nb = await cadastrarComInspecao(supervisor, { dados: notebook(empresa.id) });
+    await expect(transferirColaborador(supervisor, { ativoId: nb.id, colaboradorId: bruno.colaboradorId, modo: "ENTREGAR", alocacaoAtualId: null })).rejects.toThrow(
+      /a partir de uma alocação ativa/,
+    );
+    expect(await prisma.alocacao.count()).toBe(0);
+    expect(await prisma.transferencia.count()).toBe(0);
   });
 
   it("duas transferências simultâneas do mesmo equipamento: só uma passa e nunca há duas alocações abertas", async () => {
@@ -250,14 +251,22 @@ describe("transferência entre colaboradores", () => {
 });
 
 describe("transferência entre empresas", () => {
-  it("muda só a proprietária: alocação, responsável e empresa do colaborador ficam; carregadores sem patrimônio acompanham, com patrimônio só se escolhidos", async () => {
+  it("muda só a proprietária, e só para a empresa de quem está com o equipamento; alocação e responsável ficam; carregadores sem patrimônio acompanham, com patrimônio só se escolhidos", async () => {
     const { empresa, outra, supervisor, ana } = await cenario();
     const terceira = await criarEmpresa();
     const { nb, c1, alo } = await entregue(supervisor, empresa.id, ana.colaboradorId);
     const c2 = await adicionarCarregador(supervisor, { notebookId: nb.id });
     await prisma.ativo.update({ where: { id: c2.id }, data: { patrimonio: "VLR-9C2" } });
-    const empresaDaAna = (await prisma.colaborador.findUniqueOrThrow({ where: { id: ana.colaboradorId } })).empresaId;
 
+    // Com a Ana (da empresa atual), a propriedade não vai para outra empresa: nada muda em silêncio.
+    await expect(transferirEmpresa(supervisor, { ativoId: nb.id, empresaDestinoId: outra.id, motivo: "Rateio", confirmacao: true, empresaAtualId: empresa.id })).rejects.toThrow(
+      /só pode passar para a empresa do colaborador/,
+    );
+    expect((await ativo(nb.id)).empresaId).toBe(empresa.id);
+    expect(await prisma.transferencia.count({ where: { tipo: "EMPRESA" } })).toBe(0);
+
+    // A Ana passou a trabalhar na outra empresa (vínculo registrado em Pessoas): a transferência regulariza o uso.
+    await prisma.colaborador.update({ where: { id: ana.colaboradorId }, data: { empresaId: outra.id } });
     const r = await transferirEmpresa(supervisor, { ativoId: nb.id, empresaDestinoId: outra.id, motivo: "  Rateio de custos  ", confirmacao: true, empresaAtualId: empresa.id });
     expect(r).toMatchObject({ de: empresa.nome, para: outra.nome, repetido: false });
     expect((await ativo(nb.id)).empresaId).toBe(outra.id);
@@ -267,7 +276,8 @@ describe("transferência entre empresas", () => {
     const [item] = await abertos(nb.id);
     expect(item).toMatchObject({ alocacaoId: alo.id, empresaProprietariaId: empresa.id });
     expect(item.alocacao).toMatchObject({ estado: "ATIVA", colaboradorId: ana.colaboradorId });
-    expect((await prisma.colaborador.findUniqueOrThrow({ where: { id: ana.colaboradorId } })).empresaId).toBe(empresaDaAna);
+    // A empresa do colaborador nunca muda por transferência de equipamento.
+    expect((await prisma.colaborador.findUniqueOrThrow({ where: { id: ana.colaboradorId } })).empresaId).toBe(outra.id);
 
     expect(await prisma.transferencia.findFirstOrThrow({ where: { ativoId: nb.id, tipo: "EMPRESA" } })).toMatchObject({
       estado: "CONCLUIDA",
@@ -283,18 +293,22 @@ describe("transferência entre empresas", () => {
     expect(mov.observacao).toContain("NBI5001.C2 (VLR-9C2)"); // mantido, registrado
     expect(await prisma.movimentacaoAtivo.count({ where: { ativoId: c1.id, tipo: "TRANSFERENCIA_EMPRESA" } })).toBe(1);
 
-    // Escolhido explicitamente, o carregador com patrimônio também muda.
-    await transferirEmpresa(supervisor, { ativoId: nb.id, empresaDestinoId: terceira.id, motivo: "Venda interna", confirmacao: true, empresaAtualId: outra.id, carregadoresComPatrimonio: [c2.id] });
-    expect([(await ativo(nb.id)).empresaId, (await ativo(c1.id)).empresaId, (await ativo(c2.id)).empresaId]).toEqual([terceira.id, terceira.id, terceira.id]);
+    // Em estoque, escolhido explicitamente, o carregador com patrimônio também muda.
+    const nb2 = await cadastrarComInspecao(supervisor, { dados: notebook(empresa.id, 5002) });
+    const c2b = await adicionarCarregador(supervisor, { notebookId: nb2.id });
+    await prisma.ativo.update({ where: { id: c2b.id }, data: { patrimonio: "VLR-9C2B" } });
+    const [c1b] = await prisma.ativo.findMany({ where: { notebookId: nb2.id, sequenciaCarregador: 1 } });
+    await transferirEmpresa(supervisor, { ativoId: nb2.id, empresaDestinoId: terceira.id, motivo: "Venda interna", confirmacao: true, empresaAtualId: empresa.id, carregadoresComPatrimonio: [c2b.id] });
+    expect([(await ativo(nb2.id)).empresaId, (await ativo(c1b.id)).empresaId, (await ativo(c2b.id)).empresaId]).toEqual([terceira.id, terceira.id, terceira.id]);
     // Vínculos e sequência intactos.
-    expect((await prisma.ativo.findMany({ where: { notebookId: nb.id }, orderBy: { sequenciaCarregador: "asc" } })).map((c) => c.nomeDispositivo)).toEqual(["NBI5001.C1", "NBI5001.C2"]);
+    expect((await prisma.ativo.findMany({ where: { notebookId: nb2.id }, orderBy: { sequenciaCarregador: "asc" } })).map((c) => c.nomeDispositivo)).toEqual(["NBI5002.C1", "NBI5002.C2"]);
     expect(await prisma.transferencia.count({ where: { tipo: "EMPRESA" } })).toBe(2);
     expect(await prisma.eventoAuditoria.count({ where: { acao: "ativo.transferir_empresa", resultado: "SUCESSO" } })).toBe(2);
   });
 
   it("exige destino, motivo e confirmação; recusa a mesma empresa, empresa inativa e dados desatualizados, sem gravar nada", async () => {
     const { empresa, outra, supervisor } = await cenario();
-    const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
+    const nb = await cadastrarComInspecao(supervisor, { dados: notebook(empresa.id) });
     const base = { ativoId: nb.id, empresaDestinoId: outra.id, motivo: "Rateio", confirmacao: true, empresaAtualId: empresa.id };
     await expect(transferirEmpresa(supervisor, { ...base, empresaDestinoId: "" })).rejects.toThrow(/empresa de destino/);
     await expect(transferirEmpresa(supervisor, { ...base, motivo: "   " })).rejects.toThrow(/motivo/);
@@ -310,7 +324,7 @@ describe("transferência entre empresas", () => {
   it("duas transferências simultâneas: só uma passa", async () => {
     const { empresa, outra, supervisor } = await cenario();
     const terceira = await criarEmpresa();
-    const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
+    const nb = await cadastrarComInspecao(supervisor, { dados: notebook(empresa.id) });
     const resultados = await Promise.allSettled(
       [outra, terceira].map((d) => transferirEmpresa(supervisor, { ativoId: nb.id, empresaDestinoId: d.id, motivo: "Rateio", confirmacao: true, empresaAtualId: empresa.id })),
     );
@@ -339,7 +353,9 @@ describe("permissões no servidor", () => {
 
     const estagiario = await ator((await criarPessoa({ perfis: ["ESTAGIARIO_TI"], ativada: true })).contaId);
     await confirmarTransferencia(estagiario, { transferenciaId: pendente.id, confirmacaoFisica: true });
-    await transferirEmpresa(estagiario, { ativoId: nb.id, empresaDestinoId: outra.id, motivo: "Rateio", confirmacao: true, empresaAtualId: empresa.id });
-    expect((await ativo(nb.id)).empresaId).toBe(outra.id);
+    // Em estoque, a propriedade muda pelo Estagiário TI (com o Bruno, só para a empresa dele).
+    const nb2 = await cadastrarComInspecao(supervisor, { dados: notebook(empresa.id, 5002) });
+    await transferirEmpresa(estagiario, { ativoId: nb2.id, empresaDestinoId: outra.id, motivo: "Rateio", confirmacao: true, empresaAtualId: empresa.id });
+    expect((await ativo(nb2.id)).empresaId).toBe(outra.id);
   });
 });

@@ -17,6 +17,7 @@ import {
 } from "@/lib/inventario";
 import { configuracaoDoTexto, descreverPeca, ehComponente, pecasDaConfiguracao, resumirConfiguracao, type EspecPeca, type TipoComponente } from "@/lib/componentes";
 import { nomeParteKit, PARTES_KIT, ROTULO_PARTE, type Regra } from "@/lib/identificacao";
+import { alvosDaInspecaoEntrada, CONDICOES_ENTRADA, type CondicaoEntrada } from "@/lib/inspecao";
 import { obterArmazenamento } from "@/server/armazenamento";
 import { registrarAuditoria } from "@/server/auditoria";
 import type { Ator } from "@/server/authz/ator";
@@ -38,10 +39,21 @@ import {
   UUID,
   type FotoEnviada,
 } from "./inventario-base";
+import { alugueisQueValem, diaDe, exigirEmpresaAutorizada } from "./alugueis";
 import { resolverFabricante, resolverProcessador, resolverSistema } from "./catalogos";
 import { categoriaDoTipo } from "./categorias";
 import { aplicarConfiguracaoOriginal, criarComponente, tecnologiasMemoria, validarComponente, validarConfiguracao } from "./componentes";
 import { gerarIdentificador } from "./identificacao-ativos";
+import {
+  fotosDaInspecao,
+  leitorDeChecklists,
+  prepararInspecao,
+  registrarInspecaoEntrada,
+  resumoInspecao,
+  SELECAO_RESUMO,
+  type EntradaInspecao,
+  type InspecaoPreparada,
+} from "./inspecoes";
 
 /**
  * Inventário (banco do portal): lista com indicadores, ficha do equipamento, cadastro com o
@@ -302,8 +314,9 @@ export async function obterEquipamento(ator: Ator, id: string) {
           where: { id },
           include: {
             empresa: { select: { id: true, nome: true, sigla: true } },
-            categoriaEquipamento: { select: { id: true, nome: true, regra: true, prefixo: true } },
+            categoriaEquipamento: { select: { id: true, codigo: true, nome: true, regra: true, prefixo: true } },
             processadorCatalogo: { select: { modelo: true, codigoNomenclatura: true } },
+            inspecoes: { orderBy: [{ abertaEm: "desc" }, { numero: "desc" }], take: 30, select: SELECAO_RESUMO },
             kit: { select: { id: true, codigo: true, partes: { orderBy: { nomeDispositivo: "asc" }, select: { id: true, nomeDispositivo: true, parteKit: true, situacao: true } } } },
             notebook: { select: { id: true, nomeDispositivo: true, patrimonio: true, modelo: true } },
             carregadores: {
@@ -315,6 +328,10 @@ export async function obterEquipamento(ator: Ator, id: string) {
             itensAlocacao: SELECAO_ALOCACAO_ABERTA,
             manutencoes: { orderBy: { abertaEm: "desc" } },
             transferencias: { where: { pendente: true }, take: 1 },
+            alugueis: {
+              orderBy: [{ inicio: "desc" }, { registradoEm: "desc" }],
+              include: { empresaLocataria: { select: { id: true, nome: true, sigla: true } } },
+            },
             pecasConfiguracao: {
               where: { vigente: true },
               orderBy: [{ tipo: "asc" }, { instaladaEm: "asc" }],
@@ -327,6 +344,11 @@ export async function obterEquipamento(ator: Ator, id: string) {
       : null;
     if (!a) throw new ErroNegocio("Equipamento não encontrado.");
     const pendente = a.transferencias[0] ?? null;
+    // Aluguel que vale agora (o próprio ou, no carregador vinculado, o do notebook) e as mudanças de propriedade.
+    const [aluguelAtual, propriedade] = await Promise.all([
+      alugueisQueValem(prisma, [a]).then((m) => m.get(a.id) ?? null),
+      prisma.transferencia.findMany({ where: { ativoId: a.id, tipo: "EMPRESA", estado: "CONCLUIDA" }, orderBy: { efetivadaEm: "desc" } }),
+    ]);
     const originais = a.categoria === "NOTEBOOK" ? await prisma.pecaConfiguracao.count({ where: { equipamentoId: a.id, original: true } }) : 0;
     const { responsavel, reserva, ter } = custodia(a.itensAlocacao);
     // Escopo próprio: só o equipamento entregue à própria pessoa.
@@ -370,7 +392,15 @@ export async function obterEquipamento(ator: Ator, id: string) {
       criadoEm: a.criadoEm.toISOString(),
       criadoPorNome: a.criadoPorNome,
       atualizadoEm: a.atualizadoEm.toISOString(),
-      fotos: fotosDe(null).map((f) => ({ id: f.id, tipo: f.tipo, contexto: f.contexto, url: urlFoto(f.id), enviadaEm: f.enviadaEm.toISOString(), enviadaPorNome: f.enviadaPorNome })),
+      // As evidências das inspeções ficam com a inspeção.
+      fotos: fotosDe(null)
+        .filter((f) => f.contexto !== "INSPECAO")
+        .map((f) => ({ id: f.id, tipo: f.tipo, contexto: f.contexto, url: urlFoto(f.id), enviadaEm: f.enviadaEm.toISOString(), enviadaPorNome: f.enviadaPorNome })),
+      /** Novo ou usado na entrada no inventário (nulo nos cadastros anteriores). */
+      condicaoEntrada: a.condicaoEntrada,
+      parteKit: a.parteKit,
+      /** Inspeções técnicas (a pendente, se houver, primeiro), sem alteração depois de concluídas. */
+      inspecoes: a.inspecoes.map(resumoInspecao),
       responsavel,
       reserva,
       ter: ter && { id: ter.id, numero: ter.numero, estado: ter.estado, emitidoEm: iso(ter.emitidoEm), assinadoEm: iso(ter.assinadoRegistradoEm) },
@@ -388,6 +418,41 @@ export async function obterEquipamento(ator: Ator, id: string) {
         modelo: c.modelo,
         desvinculadoEm: iso(c.desvinculadoEm),
         motivoDesvinculo: c.motivoDesvinculo,
+      })),
+      /** Empresa locatária com aluguel vigente (a propriedade não muda); no carregador, pode vir do notebook. */
+      aluguel: aluguelAtual && {
+        id: aluguelAtual.id,
+        empresa: aluguelAtual.empresaLocataria,
+        inicio: dia(aluguelAtual.inicio)!,
+        devolucaoPrevista: dia(aluguelAtual.devolucaoPrevista),
+        motivo: aluguelAtual.motivo,
+        registradoEm: aluguelAtual.registradoEm.toISOString(),
+        registradoPorNome: aluguelAtual.registradoPorNome,
+        herdado: aluguelAtual.herdado,
+      },
+      /** Histórico de aluguéis do próprio equipamento (o vigente e os encerrados). */
+      alugueis: a.alugueis.map((x) => ({
+        id: x.id,
+        empresa: x.empresaLocataria,
+        inicio: dia(x.inicio)!,
+        devolucaoPrevista: dia(x.devolucaoPrevista),
+        motivo: x.motivo,
+        observacoes: x.observacoes,
+        vigente: x.vigente === true,
+        registradoEm: x.registradoEm.toISOString(),
+        registradoPorNome: x.registradoPorNome,
+        encerradoEm: iso(x.encerradoEm),
+        encerradoPorNome: x.encerradoPorNome,
+        motivoEncerramento: x.motivoEncerramento,
+      })),
+      /** Mudanças de propriedade (transferências entre empresas). */
+      transferenciasEmpresa: propriedade.map((t) => ({
+        id: t.id,
+        de: t.empresaOrigemNome,
+        para: t.empresaDestinoNome,
+        motivo: t.motivo,
+        efetivadaEm: iso(t.efetivadaEm ?? t.criadaEm)!,
+        realizadaPorNome: t.realizadaPorNome,
       })),
       /** Transferência de colaborador reservada: a custódia atual continua até a entrega física. */
       transferenciaPendente: pendente && {
@@ -624,6 +689,7 @@ async function criarCarregador(
   ator: Ator,
   notebook: { id: string; nomeDispositivo: string | null; empresaId: string; marca: string; marcaId: string | null },
   observacao: string,
+  condicaoEntrada: CondicaoEntrada | null = null,
 ) {
   if (!notebook.nomeDispositivo) throw new ErroNegocio("O notebook não tem identificador para nomear os carregadores.");
   const usadas = await tx.ativo.findMany({ where: { notebookId: notebook.id }, select: { sequenciaCarregador: true } });
@@ -640,6 +706,7 @@ async function criarCarregador(
       modelo: "Carregador",
       notebookId: notebook.id,
       sequenciaCarregador: sequencia,
+      condicaoEntrada,
       criadoPorNome: ator.nome,
     },
   });
@@ -652,9 +719,9 @@ async function criarCarregador(
 async function cadastroRepetido(chave: string | null) {
   if (!chave) return null;
   const ativo = await prisma.ativo.findUnique({ where: { chaveRequisicao: chave }, select: { id: true, nomeDispositivo: true } });
-  if (ativo) return { id: ativo.id, nome: ativo.nomeDispositivo, carregador: null, pecas: [] as string[], repetido: true };
+  if (ativo) return { id: ativo.id, nome: ativo.nomeDispositivo, carregador: null, pecas: [] as string[], emManutencao: [] as string[], repetido: true };
   const kit = await prisma.kitEquipamento.findUnique({ where: { chaveRequisicao: chave }, select: { codigo: true, partes: { orderBy: { nomeDispositivo: "asc" }, take: 1, select: { id: true } } } });
-  return kit?.partes[0] ? { id: kit.partes[0].id, nome: kit.codigo as string | null, carregador: null, pecas: [] as string[], repetido: true } : null;
+  return kit?.partes[0] ? { id: kit.partes[0].id, nome: kit.codigo as string | null, carregador: null, pecas: [] as string[], emManutencao: [] as string[], repetido: true } : null;
 }
 
 /**
@@ -665,7 +732,16 @@ async function cadastroRepetido(chave: string | null) {
  */
 export async function cadastrarEquipamento(
   ator: Ator,
-  entrada: { dados: DadosEquipamento; fotos?: FotoEnviada[]; fotosPartes?: Partial<Record<string, FotoEnviada[]>>; chaveRequisicao?: string },
+  entrada: {
+    dados: DadosEquipamento;
+    fotos?: FotoEnviada[];
+    fotosPartes?: Partial<Record<string, FotoEnviada[]>>;
+    chaveRequisicao?: string;
+    /** Novo ou usado: define as verificações da inspeção de entrada. */
+    condicaoEntrada?: string | null;
+    /** Inspeção de entrada de cada equipamento criado: "principal", "carregador" (C1) ou a peça do kit. */
+    inspecoes?: Partial<Record<string, EntradaInspecao>>;
+  },
 ) {
   return executarCasoDeUso(ator, async () => {
     const { origem } = exigirPermissao(ator, "ativo.criar");
@@ -696,8 +772,32 @@ export async function cadastrarEquipamento(
     const partes = cat.regra === "KIT" ? lerPartesKit(entrada.dados.partesKit) : [];
     const fotos = prepararFotos(cat.regra === "KIT" ? [] : (entrada.fotos ?? []));
     const fotosPartes = new Map(partes.map((p) => [p.parte, prepararFotos(entrada.fotosPartes?.[p.parte] ?? [])]));
-    const todas = [...fotos, ...[...fotosPartes.values()].flat()];
+    // Inspeção de entrada obrigatória para cada equipamento que nasce aqui (nunca presumida).
+    const condicao = CONDICOES_ENTRADA.find((c) => c === entrada.condicaoEntrada);
+    if (!condicao) throw new ErroNegocio("Informe a condição de entrada do equipamento (novo ou usado).");
+    // Checklist vigente da categoria (o C1 do notebook usa o da categoria de carregadores).
+    const checklist = leitorDeChecklists(prisma);
+    const categoriaCarregador = tipo === "NOTEBOOK" ? (await categoriaDoTipo(prisma, "CARREGADOR")).id : null;
+    const inspecoes = new Map(
+      await Promise.all(
+        alvosDaInspecaoEntrada(tipo, cat.nome, partes.map((p) => p.parte)).map(
+          async (x) =>
+            [
+              x.alvo,
+              prepararInspecao(await checklist(x.fonte === "carregador" ? categoriaCarregador! : cat.id), { tipo: "ENTRADA", condicao, parte: x.parte }, entrada.inspecoes?.[x.alvo], x.rotulo),
+            ] as const,
+        ),
+      ),
+    );
+    const fotosInspecao = [...inspecoes.values()].flatMap(fotosDaInspecao);
+    if (fotosInspecao.length) exigirPermissao(ator, "evidencia.enviar");
+    const todas = [...fotos, ...[...fotosPartes.values()].flat(), ...fotosInspecao];
     await gravarArquivosFotos(todas);
+    const emManutencao: string[] = [];
+    const inspecionar = async (tx: Transacao, alvo: string, ativoId: string) => {
+      const r = await registrarInspecaoEntrada(tx, ator, ativoId, inspecoes.get(alvo) as InspecaoPreparada, condicao);
+      if (r.resultado === "INAPTO") emManutencao.push(r.nome);
+    };
 
     try {
       const resultado = await prisma.$transaction(async (tx) => {
@@ -709,9 +809,23 @@ export async function cadastrarEquipamento(
           for (const p of partes) {
             const nome = nomeParteKit(codigo, p.parte);
             const parte = await tx.ativo.create({
-              data: { categoria: tipo, categoriaId: cat.id, kitId: kit.id, parteKit: p.parte, nomeDispositivo: nome, patrimonio: null, empresaId: empresa.id, ...dados, ...modelo, numeroSerie: p.numeroSerie, criadoPorNome: ator.nome },
+              data: {
+                categoria: tipo,
+                categoriaId: cat.id,
+                kitId: kit.id,
+                parteKit: p.parte,
+                nomeDispositivo: nome,
+                patrimonio: null,
+                empresaId: empresa.id,
+                ...dados,
+                ...modelo,
+                numeroSerie: p.numeroSerie,
+                condicaoEntrada: condicao,
+                criadoPorNome: ator.nome,
+              },
             });
             await registrarMovimentacao(tx, ator, parte.id, { tipo: "CADASTRO", situacaoNova: "DISPONIVEL", observacao: `Kit ${codigo}: ${ROTULO_PARTE[p.parte].toLowerCase()}. Empresa proprietária: ${empresa.nome}.` });
+            await inspecionar(tx, p.parte, parte.id);
             const fotosDaParte = fotosPartes.get(p.parte) ?? [];
             if (fotosDaParte.length) await tx.fotoAtivo.createMany({ data: fotosDaParte.map((f) => ({ ...dadosFoto(f, parte.id, ator), contexto: "CADASTRO" as const })) });
             criadas.push({ id: parte.id, nome });
@@ -724,12 +838,13 @@ export async function cadastrarEquipamento(
             origemPermissao: origem,
             detalhe: { categoria: cat.nome, kit: codigo, pecas: criadas.map((c) => c.nome), empresa: empresa.nome, fotos: todas.length },
           });
-          return { id: criadas[0].id, nome: codigo, carregador: null, pecas: criadas.map((c) => c.nome) };
+          return { id: criadas[0].id, nome: codigo, carregador: null, pecas: criadas.map((c) => c.nome), emManutencao };
         }
 
         let ativo;
         if (especificacao) {
           ativo = await criarComponente(tx, ator, especificacao, empresa.id, `Empresa proprietária: ${empresa.nome}.`, { chaveRequisicao: chave, patrimonio });
+          await tx.ativo.update({ where: { id: ativo.id }, data: { condicaoEntrada: condicao } });
         } else {
           const nomeDispositivo = automatico ? await gerarIdentificador(tx, { ...cat, codigoProcessador: processador?.codigo }) : nomeManual;
           ativo = await tx.ativo.create({
@@ -742,6 +857,7 @@ export async function cadastrarEquipamento(
               ...dados,
               ...modelo,
               chaveRequisicao: chave,
+              condicaoEntrada: condicao,
               criadoPorNome: ator.nome,
             },
           });
@@ -750,10 +866,13 @@ export async function cadastrarEquipamento(
         let carregador: string | null = null;
         if (tipo === "NOTEBOOK") {
           // Notebook e carregador principal (C1) na mesma transação.
-          carregador = (await criarCarregador(tx, ator, ativo, "Carregador principal criado com o notebook")).nomeDispositivo;
+          const c1 = await criarCarregador(tx, ator, ativo, "Carregador principal criado com o notebook", condicao);
+          carregador = c1.nomeDispositivo;
           // Só a especificação: nenhuma peça física (RAM001, SSD001...) nasce do cadastro.
           if (configuracao) await aplicarConfiguracaoOriginal(tx, ator, ativo, configuracao);
+          await inspecionar(tx, "carregador", c1.id);
         }
+        await inspecionar(tx, "principal", ativo.id);
         if (fotos.length) await tx.fotoAtivo.createMany({ data: fotos.map((f) => ({ ...dadosFoto(f, ativo.id, ator), contexto: "CADASTRO" as const })) });
         await registrarAuditoria(tx, {
           acao: "ativo.criar",
@@ -761,9 +880,18 @@ export async function cadastrarEquipamento(
           ator: { contaId: ator.contaId, nome: ator.nome },
           alvo: { tipo: "ativo", id: ativo.id, descricao: rotuloAtivo(ativo) },
           origemPermissao: origem,
-          detalhe: { categoria: cat.nome, identificador: ativo.nomeDispositivo, empresa: empresa.nome, fotos: fotos.length, carregadorPrincipal: tipo === "NOTEBOOK", configuracaoOriginal: Boolean(configuracao) },
+          detalhe: {
+            categoria: cat.nome,
+            identificador: ativo.nomeDispositivo,
+            empresa: empresa.nome,
+            fotos: fotos.length,
+            carregadorPrincipal: tipo === "NOTEBOOK",
+            configuracaoOriginal: Boolean(configuracao),
+            condicaoEntrada: condicao,
+            emManutencao,
+          },
         });
-        return { id: ativo.id, nome: ativo.nomeDispositivo, carregador, pecas: [] as string[] };
+        return { id: ativo.id, nome: ativo.nomeDispositivo, carregador, pecas: [] as string[], emManutencao };
       });
       return { ...resultado, repetido: false };
     } catch (erro) {
@@ -923,7 +1051,7 @@ export async function desvincularCarregador(
         await travarAtivos(tx, [previo.notebookId, entrada.carregadorId]);
         const carregador = await tx.ativo.findUniqueOrThrow({
           where: { id: entrada.carregadorId },
-          include: { notebook: true, itensAlocacao: { where: { aberto: true }, include: { alocacao: { include: { colaborador: { select: { id: true, nome: true } } } } } } },
+          include: { notebook: true, itensAlocacao: { where: { aberto: true }, include: { alocacao: { include: { colaborador: { select: { id: true, nome: true, empresaId: true } } } } } } },
         });
         const notebook = carregador.notebook!;
         if (carregador.desvinculadoEm) throw new ErroNegocio("Este carregador já foi desvinculado.");
@@ -960,6 +1088,7 @@ export async function desvincularCarregador(
           substituto = { id: novo.id, nome: novo.nomeDispositivo! };
           if (entregue) {
             // A pessoa recebe o substituto em troca: mesma alocação, entrega registrada agora.
+            await exigirEmpresaAutorizada(tx, [novo], entregue.alocacao.colaborador.empresaId, diaDe(agora));
             await tx.itemAlocacao.create({ data: { alocacaoId: entregue.alocacaoId, ativoId: novo.id, empresaProprietariaId: novo.empresaId } });
             await mudarSituacao(tx, ator, { id: novo.id, situacao: "DISPONIVEL", rotulo: substituto.nome }, "ALOCADO", {
               tipo: "ENTREGA",

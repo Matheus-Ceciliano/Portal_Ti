@@ -101,10 +101,9 @@ export const transicaoValida = (de: Situacao, para: Situacao) => TRANSICOES[de].
 export const PODE_IR_PARA_MANUTENCAO: readonly Situacao[] = ["DISPONIVEL", "ALOCADO", "DEVOLVIDO_EM_AVALIACAO"];
 
 /**
- * Transferência de colaborador: do estoque (nova alocação) ou de quem está com o equipamento.
+ * Transferência de colaborador: só a partir de uma alocação ativa (equipamento com alguém).
  * As demais situações explicam o bloqueio; a de empresa só não vale para baixado.
  */
-export const PODE_TRANSFERIR_COLABORADOR: readonly Situacao[] = ["DISPONIVEL", "ALOCADO"];
 export const BLOQUEIO_TRANSFERENCIA_COLABORADOR: Partial<Record<Situacao, string>> = {
   RESERVADO: "Equipamento reservado: confirme a entrega ou cancele a reserva em Alocações.",
   MANUTENCAO: "Equipamento em manutenção não pode ser transferido. Conclua a manutenção antes.",
@@ -167,6 +166,8 @@ export const ROTULO_MOVIMENTACAO: Record<string, string> = {
   COMPONENTE_INSTALADO: "Componente instalado",
   COMPONENTE_REMOVIDO: "Componente removido",
   COMPONENTE_SUBSTITUIDO: "Componente substituído",
+  ALUGUEL_INICIADO: "Aluguel entre empresas",
+  ALUGUEL_ENCERRADO: "Fim do aluguel entre empresas",
   RESERVA: "Reserva para entrega",
   CANCELAMENTO_RESERVA: "Reserva cancelada",
   ENTREGA: "Entrega física",

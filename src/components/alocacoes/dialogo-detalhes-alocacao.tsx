@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckCircle2, FileCheck2, FileText, FileUp, Info, PackageCheck, RotateCw, Undo2, UserRound, XCircle } from "lucide-react";
+import { ArrowLeftRight, CheckCircle2, ClipboardCheck, FileCheck2, FileText, FileUp, Info, PackageCheck, RotateCw, Undo2, UserRound, XCircle } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
@@ -9,6 +9,10 @@ import { AlertaFormulario, Campo } from "@/components/comum/campos";
 import { formatarData } from "@/components/comum/pagina";
 import { Estado, StatusBadge } from "@/components/comum/status-badge";
 import { LARGURA_MODAL, MODAL_CENTRALIZADO } from "@/components/empresas/posicao-modal";
+import { ResultadoInspecaoBadge } from "@/components/inspecoes/checklist";
+import { DialogoAvaliacaoTecnica, DialogoDetalhesInspecao, exibirInstantaneo, type EquipamentoAvaliacao, type InspecaoExibida } from "@/components/inspecoes/dialogos-inspecao";
+import { errosVerificacao, montarVerificacoes, useCondicoesEntrega, VerificacaoCondicoes, type Decisoes } from "@/components/inspecoes/verificacao-entrega";
+import { AvisoTransferenciaReservada, type EquipamentoTransferencia } from "@/components/inventario/ficha/dialogos-transferencia";
 import { BadgeTer, formatarDataHora, agoraLocal, localParaIso, MiniaturaEquipamento } from "@/components/inventario/visual";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -21,9 +25,36 @@ import { cn } from "@/lib/utils";
 import { acaoCancelarReserva, acaoConfirmarEntrega, acaoDetalheAlocacao, acaoRegistrarTerAssinado } from "@/server/acoes/alocacoes";
 import type { DetalheAlocacaoReal } from "@/server/modulos/alocacoes";
 import { DialogoDevolucao } from "./dialogo-devolucao";
+import { DialogoTransferirDaAlocacao, transferiveis } from "./dialogo-transferir-alocacao";
 
 type Resposta = Awaited<ReturnType<typeof acaoDetalheAlocacao>>;
-export type PermissoesAlocacao = { confirmar: boolean; cancelar: boolean; devolver: boolean; anexarTer: boolean };
+export type PermissoesAlocacao = {
+  confirmar: boolean;
+  cancelar: boolean;
+  devolver: boolean;
+  anexarTer: boolean;
+  /** Transferir equipamento para outro colaborador (só em alocação ativa). */
+  transferir?: boolean;
+  /** Fazer a avaliação técnica do equipamento devolvido. */
+  avaliar?: boolean;
+};
+
+type ItemAlocacao = DetalheAlocacaoReal["itens"][number];
+
+/** O que os diálogos de transferência precisam de um item da alocação. */
+function equipamentoDoItem(d: DetalheAlocacaoReal, i: ItemAlocacao): EquipamentoTransferencia {
+  return {
+    id: i.ativo.id,
+    rotulo: i.ativo.nome ?? i.ativo.patrimonio ?? i.ativo.modelo,
+    descricao: `${i.ativo.rotuloCategoria} · ${i.ativo.marca} ${i.ativo.modelo}`,
+    empresa: i.empresaProprietaria,
+    responsavel: d.estado === "ATIVA" ? { id: d.colaborador.id, nome: d.colaborador.nome, alocacao: d.numero, alocacaoId: d.id, empresa: d.empresaColaborador } : null,
+    empresaAutorizada: d.empresaColaborador,
+    carregadores: d.itens
+      .filter((c) => c.aberto && c.ativo.carregadorDe === i.ativo.id)
+      .map((c) => ({ id: c.ativo.id, nome: c.ativo.nome, patrimonio: c.ativo.patrimonio, situacao: c.ativo.situacao })),
+  };
+}
 
 /** Cabeçalho mostrado na hora (linha clicada); o restante vem do servidor. */
 export type AlocacaoCabecalho = { id: string; numero: string; colaborador: string; estado: DetalheAlocacaoReal["estado"] };
@@ -80,7 +111,9 @@ function Conteudo({ inicial, pode, destacarAtivo }: { inicial: AlocacaoCabecalho
   const router = useRouter();
   const [resposta, setResposta] = useState<Resposta | null>(null);
   const [tentativa, setTentativa] = useState(0);
-  const [acao, setAcao] = useState<"confirmar" | "cancelar" | "devolver" | null>(null);
+  const [acao, setAcao] = useState<"confirmar" | "cancelar" | "devolver" | "transferir" | null>(null);
+  const [avaliando, setAvaliando] = useState<EquipamentoAvaliacao | null>(null);
+  const [condicao, setCondicao] = useState<InspecaoExibida | null>(null);
   // Uma consulta por abertura, mesmo com o efeito executado duas vezes no StrictMode (dev).
   const pedido = useRef<{ chave: string; promessa: Promise<Resposta> } | null>(null);
 
@@ -186,7 +219,7 @@ function Conteudo({ inicial, pode, destacarAtivo }: { inicial: AlocacaoCabecalho
                 {d.itens.map((i) => {
                   const outra = i.empresaProprietaria.id !== d.empresaColaborador.id;
                   return (
-                    <li key={i.id} className={cn("flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center", destacarAtivo === i.ativo.id && "bg-accent/50")}>
+                    <li key={i.id} className={cn("flex flex-col gap-2 px-4 py-3 sm:flex-row sm:flex-wrap sm:items-center", destacarAtivo === i.ativo.id && "bg-accent/50")}>
                       <div className="flex min-w-0 flex-1 items-center gap-3">
                         <MiniaturaEquipamento url={i.ativo.miniatura} categoria={i.ativo.categoria} />
                         <span className="min-w-0">
@@ -215,11 +248,53 @@ function Conteudo({ inicial, pode, destacarAtivo }: { inicial: AlocacaoCabecalho
                           </StatusBadge>
                         )}
                       </div>
+                      {i.aberto && i.transferenciaPendente ? (
+                        <div className="sm:basis-full">
+                          <AvisoTransferenciaReservada
+                            equipamento={equipamentoDoItem(d, i)}
+                            transferencia={i.transferenciaPendente}
+                            pode={{ confirmar: Boolean(pode.transferir) && pode.confirmar && pode.devolver, cancelar: pode.cancelar }}
+                            aoConcluir={recarregar}
+                          />
+                        </div>
+                      ) : null}
+                      {i.verificacao ? (
+                        <p className="flex flex-wrap items-center gap-1.5 text-[12.5px] text-muted-foreground sm:basis-full" data-testid="condicao-entrega">
+                          <span>Condição na entrega:</span>
+                          {i.verificacao.instantaneo.inspecao.resultado ? <ResultadoInspecaoBadge resultado={i.verificacao.instantaneo.inspecao.resultado} className="h-5 text-[11px]" /> : null}
+                          <span>
+                            {i.verificacao.instantaneo.inspecao.numero} · {i.verificacao.modo === "CONFIRMOU_ULTIMA" ? "última inspeção confirmada" : "inspeção na entrega"}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setCondicao(exibirInstantaneo(i.verificacao!))}
+                            className="font-semibold text-link underline-offset-4 hover:underline focus-visible:underline focus-visible:outline-none"
+                          >
+                            Ver checklist
+                          </button>
+                        </p>
+                      ) : null}
                       {i.devolucao ? (
                         <p className="text-[12.5px] text-muted-foreground sm:basis-full">
                           {i.devolucao.numero}: {ROTULO_ESTADO_FISICO[i.devolucao.estadoFisico]} → {ROTULO_DESTINO_DEVOLUCAO[i.devolucao.destino]}
                           {i.devolucao.observacoes ? ` · ${i.devolucao.observacoes}` : ""}
                         </p>
+                      ) : null}
+                      {!i.aberto && i.ativo.inspecaoPendente ? (
+                        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-atencao/30 bg-atencao-fundo px-3 py-2 text-[12.5px] text-atencao sm:basis-full" data-testid="inspecao-pendente">
+                          <ClipboardCheck className="size-4 shrink-0" aria-hidden />
+                          <span className="min-w-0 flex-1">Em avaliação: a inspeção técnica está pendente. O equipamento só volta a ser alocado depois dela.</span>
+                          {pode.avaliar ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => setAvaliando({ id: i.ativo.id, rotulo: i.ativo.nome ?? i.ativo.patrimonio ?? i.ativo.modelo })}
+                            >
+                              Realizar inspeção
+                            </Button>
+                          ) : null}
+                        </div>
                       ) : null}
                     </li>
                   );
@@ -278,6 +353,12 @@ function Conteudo({ inicial, pode, destacarAtivo }: { inicial: AlocacaoCabecalho
             <CheckCircle2 aria-hidden /> Confirmar entrega
           </Button>
         ) : null}
+        {/* A transferência para outro colaborador só existe em alocação ativa. */}
+        {d && estado === "ATIVA" && pode.transferir && transferiveis(d).length ? (
+          <Button variant="secondary" onClick={() => setAcao("transferir")} data-testid="transferir-colaborador">
+            <ArrowLeftRight aria-hidden /> Transferir colaborador
+          </Button>
+        ) : null}
         {d && estado === "ATIVA" && pode.devolver && abertos.length ? (
           <Button onClick={() => setAcao("devolver")}>
             <Undo2 aria-hidden /> Registrar devolução
@@ -288,6 +369,11 @@ function Conteudo({ inicial, pode, destacarAtivo }: { inicial: AlocacaoCabecalho
       {d && acao === "confirmar" ? <DialogoConfirmarEntrega dados={d} aoFechar={() => setAcao(null)} aoConcluir={recarregar} /> : null}
       {d && acao === "cancelar" ? <DialogoCancelarReserva dados={d} aoFechar={() => setAcao(null)} aoConcluir={recarregar} /> : null}
       {d && acao === "devolver" ? <DialogoDevolucao dados={d} aoFechar={() => setAcao(null)} aoConcluir={recarregar} /> : null}
+      {d && acao === "transferir" ? (
+        <DialogoTransferirDaAlocacao dados={d} podeEntregar={pode.confirmar && pode.devolver} aoFechar={() => setAcao(null)} aoConcluir={recarregar} />
+      ) : null}
+      {avaliando ? <DialogoAvaliacaoTecnica key={avaliando.id} aberto aoMudar={(v) => !v && setAvaliando(null)} equipamento={avaliando} aoConcluir={recarregar} /> : null}
+      <DialogoDetalhesInspecao dados={condicao} aberto={Boolean(condicao)} aoMudar={(v) => !v && setCondicao(null)} />
     </>
   );
 }
@@ -375,37 +461,72 @@ function Documentos({ dados, podeAnexar, aoMudar }: { dados: DetalheAlocacaoReal
   );
 }
 
+/** Reserva → entrega física: data da entrega e a verificação técnica de cada equipamento. */
 function DialogoConfirmarEntrega({ dados, aoFechar, aoConcluir }: { dados: DetalheAlocacaoReal; aoFechar: () => void; aoConcluir: () => void }) {
   const [quando, setQuando] = useState(() => agoraLocal());
   const [erro, setErro] = useState<string | null>(null);
   const [enviando, setEnviando] = useState(false);
+  const [decisoes, setDecisoes] = useState<Decisoes>({});
+  const [erros, setErros] = useState<Record<string, string>>({});
+  const reservados = dados.itens.filter((i) => i.aberto).map((i) => i.ativo.id);
+  const { condicoes, erro: erroCondicoes, recarregar } = useCondicoesEntrega(reservados, true);
   async function confirmar() {
+    if (!condicoes) return;
+    const e = errosVerificacao(condicoes, decisoes);
+    setErros(e);
+    if (Object.keys(e).length) return setErro("Confirme a condição de cada equipamento antes da entrega.");
+    const { verificacoes, anexos } = montarVerificacoes(condicoes, decisoes);
     setEnviando(true);
-    const r = await acaoConfirmarEntrega(dados.id, localParaIso(quando)).catch(() => ({ ok: false as const, erro: FALHA }));
+    setErro(null);
+    const r = await acaoConfirmarEntrega(dados.id, localParaIso(quando), verificacoes, anexos).catch(() => ({ ok: false as const, erro: FALHA }));
     setEnviando(false);
-    if (!r.ok) return setErro(r.erro);
+    if (!r.ok) {
+      if (/inspeç|condição/i.test(r.erro)) recarregar();
+      return setErro(r.erro);
+    }
     toast.success(r.mensagem);
     aoFechar();
     aoConcluir();
   }
   return (
     <Dialog open onOpenChange={(v) => !v && !enviando && aoFechar()}>
-      <DialogContent className={cn(MODAL_CENTRALIZADO, "w-[calc(100%-1rem)] sm:max-w-[520px]")} data-testid="dialogo-confirmar-entrega">
-        <DialogHeader>
+      <DialogContent
+        className={cn(
+          MODAL_CENTRALIZADO,
+          "flex max-h-[calc(100dvh-2rem)] w-[calc(100%-1rem)] flex-col gap-0 overflow-hidden p-0",
+          "sm:max-w-[min(760px,calc(100%-2rem))] lg:max-w-[min(760px,calc(100%_-_var(--largura-sidebar,15rem)_-_2rem))]",
+        )}
+        data-testid="dialogo-confirmar-entrega"
+        onInteractOutside={(e) => e.preventDefault()}
+      >
+        <DialogHeader className="shrink-0 border-b px-6 pt-5 pr-14 pb-4">
           <DialogTitle>Confirmar entrega física</DialogTitle>
           <DialogDescription>
-            {dados.itens.filter((i) => i.aberto).length} equipamento(s) passam a ficar com {dados.colaborador.nome}. O TER segue o próprio ciclo.
+            {reservados.length} equipamento(s) passam a ficar com {dados.colaborador.nome}. O TER segue o próprio ciclo.
           </DialogDescription>
         </DialogHeader>
-        {erro ? <AlertaFormulario tom="erro">{erro}</AlertaFormulario> : null}
-        <Campo rotulo="Data e hora da entrega" obrigatorio>
-          {(p) => <Input {...p} type="datetime-local" value={quando} max={agoraLocal()} onChange={(e) => setQuando(e.target.value)} />}
-        </Campo>
-        <DialogFooter>
+        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overscroll-contain px-6 py-5">
+          {erro ? <AlertaFormulario tom="erro">{erro}</AlertaFormulario> : null}
+          <Campo rotulo="Data e hora da entrega" obrigatorio className="sm:max-w-xs">
+            {(p) => <Input {...p} type="datetime-local" value={quando} max={agoraLocal()} onChange={(e) => setQuando(e.target.value)} />}
+          </Campo>
+          <VerificacaoCondicoes
+            condicoes={condicoes}
+            erro={erroCondicoes}
+            aoTentarDeNovo={recarregar}
+            decisoes={decisoes}
+            aoMudar={(id, d) => {
+              setDecisoes((x) => ({ ...x, [id]: d }));
+              setErros((x) => ({ ...x, [id]: "" }));
+            }}
+            erros={erros}
+          />
+        </div>
+        <DialogFooter className="mx-0 mb-0 shrink-0">
           <Button variant="secondary" disabled={enviando} onClick={aoFechar}>
             Voltar
           </Button>
-          <Button carregando={enviando} rotuloCarregando="Confirmando…" onClick={() => void confirmar()}>
+          <Button carregando={enviando} rotuloCarregando="Confirmando…" disabled={!condicoes} onClick={() => void confirmar()}>
             Confirmar entrega
           </Button>
         </DialogFooter>

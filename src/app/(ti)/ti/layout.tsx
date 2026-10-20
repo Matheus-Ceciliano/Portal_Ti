@@ -1,5 +1,7 @@
+import { cookies } from "next/headers";
 import { FaixaAmbiente } from "@/components/comum/faixa-ambiente";
 import { CascaTi } from "@/components/layout/casca-ti";
+import { barraFixada, COOKIE_BARRA_LATERAL } from "@/components/layout/preferencia-barra";
 import { exigirAreaTi } from "@/server/auth/sessao";
 import { PERFIS_ADMINISTRATIVOS, ROTULO_PERFIL } from "@/server/authz/catalogo";
 import { pode } from "@/server/authz/exigir";
@@ -12,9 +14,12 @@ export default async function LayoutTi({ children }: { children: React.ReactNode
   const navegacao = navegacaoTi(ator, {
     chamadosSemResponsavel: CHAMADOS.filter((c) => c.estado !== "RESOLVIDO" && !c.responsavelId).length,
   });
+  // Preferência da barra lateral (fixada ou recolhida) lida aqui: o primeiro quadro já sai certo.
+  const fixada = barraFixada((await cookies()).get(COOKIE_BARRA_LATERAL)?.value);
   return (
     <CascaTi
       navegacao={navegacao}
+      fixadaInicial={fixada}
       faixa={<FaixaAmbiente />}
       usuario={{
         nome: ator.nome,

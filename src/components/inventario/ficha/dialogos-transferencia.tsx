@@ -37,13 +37,15 @@ export type EquipamentoTransferencia = {
   descricao: string;
   empresa: { id: string; nome: string; sigla: string };
   /** Quem está com o equipamento (alocação ativa); nulo: em estoque. */
-  responsavel: { id: string; nome: string; alocacao: string; alocacaoId: string } | null;
+  responsavel: { id: string; nome: string; alocacao: string; alocacaoId: string; empresa?: { id: string; nome: string; sigla: string } } | null;
+  /** Empresa que pode receber o equipamento: a locatária (aluguel vigente) ou a proprietária. */
+  empresaAutorizada: { id: string; nome: string; sigla: string };
   /** Carregadores vinculados (não desvinculados). */
   carregadores: { id: string; nome: string | null; patrimonio: string | null; situacao: string }[];
 };
 
-/** Resposta da ação: aviso, atualização da tela e fechamento. */
-function useConcluir(aoMudar: (v: boolean) => void) {
+/** Resposta da ação: aviso, atualização da tela e fechamento (e `aoConcluir`, de quem abriu o diálogo). */
+function useConcluir(aoMudar: (v: boolean) => void, aoConcluir?: () => void) {
   const router = useRouter();
   return (r: Resultado, setErro: (e: string | null) => void) => {
     if (!r.ok) {
@@ -53,6 +55,7 @@ function useConcluir(aoMudar: (v: boolean) => void) {
     toast.success(r.mensagem);
     router.refresh();
     aoMudar(false);
+    aoConcluir?.();
   };
 }
 
@@ -107,13 +110,15 @@ export function DialogoTransferirColaborador({
   aoMudar,
   equipamento,
   podeEntregar,
+  aoConcluir,
 }: {
   aberto: boolean;
   aoMudar: (v: boolean) => void;
   equipamento: EquipamentoTransferencia;
   podeEntregar: boolean;
+  aoConcluir?: () => void;
 }) {
-  const concluir = useConcluir(aoMudar);
+  const concluir = useConcluir(aoMudar, aoConcluir);
   const r = equipamento.responsavel;
   const [colaboradores, setColaboradores] = useState<ColaboradorTransferencia[] | null>(null);
   const [erroCarga, setErroCarga] = useState<string | null>(null);
@@ -220,8 +225,11 @@ export function DialogoTransferirColaborador({
                     setColaboradorId(v);
                     setErros((x) => ({ ...x, colaborador: "" }));
                   }}
-                  // O colaborador atual não aparece: transferir para ele mesmo não é permitido.
-                  opcoes={colaboradores.filter((c) => c.id !== r?.id).map((c) => ({ valor: c.id, rotulo: c.nome, detalhe: c.empresa.sigla }))}
+                  // Só colaboradores da empresa que pode usar o equipamento (proprietária ou locatária);
+                  // o atual não aparece: transferir para ele mesmo não é permitido.
+                  opcoes={colaboradores
+                    .filter((c) => c.id !== r?.id && c.empresa.id === equipamento.empresaAutorizada.id)
+                    .map((c) => ({ valor: c.id, rotulo: c.nome, detalhe: c.empresa.sigla }))}
                   placeholder="Selecione o colaborador"
                   pesquisavel
                 />
@@ -324,13 +332,15 @@ export function DialogoConfirmarTransferencia({
   aoMudar,
   equipamento,
   transferencia,
+  aoConcluir,
 }: {
   aberto: boolean;
   aoMudar: (v: boolean) => void;
   equipamento: EquipamentoTransferencia;
   transferencia: TransferenciaReservada;
+  aoConcluir?: () => void;
 }) {
-  const concluir = useConcluir(aoMudar);
+  const concluir = useConcluir(aoMudar, aoConcluir);
   const r = equipamento.responsavel;
   const [quando, setQuando] = useState(() => agoraLocal());
   const [confirmado, setConfirmado] = useState(false);
@@ -396,13 +406,15 @@ export function DialogoCancelarTransferencia({
   aoMudar,
   equipamento,
   transferencia,
+  aoConcluir,
 }: {
   aberto: boolean;
   aoMudar: (v: boolean) => void;
   equipamento: EquipamentoTransferencia;
   transferencia: TransferenciaReservada;
+  aoConcluir?: () => void;
 }) {
-  const concluir = useConcluir(aoMudar);
+  const concluir = useConcluir(aoMudar, aoConcluir);
   const [motivo, setMotivo] = useState("");
   const [erroMotivo, setErroMotivo] = useState<string | null>(null);
   const [erro, setErro] = useState<string | null>(null);
@@ -527,7 +539,8 @@ export function DialogoTransferirEmpresa({
                 <p className="flex items-start gap-2 rounded-lg border border-info/25 bg-info-fundo px-3.5 py-2.5 text-[13px] text-foreground" role="note">
                   <Info className="mt-0.5 size-4 shrink-0 text-info" aria-hidden />
                   <span>
-                    A alteração de propriedade não modifica quem está com o equipamento: continua com <strong>{r.nome}</strong> ({r.alocacao}).
+                    Está com <strong>{r.nome}</strong>
+                    {r.empresa ? ` (${r.empresa.sigla})` : ""}, {r.alocacao}. A propriedade só pode passar para a empresa dessa pessoa; para outra, registre a devolução antes.
                   </span>
                 </p>
               ) : null}
@@ -646,15 +659,17 @@ export function DialogoTransferirEmpresa({
   );
 }
 
-/** Aviso da transferência reservada na ficha, com as ações de confirmar e cancelar. */
+/** Aviso da transferência reservada (no detalhe da alocação), com as ações de confirmar e cancelar. */
 export function AvisoTransferenciaReservada({
   equipamento,
   transferencia,
   pode,
+  aoConcluir,
 }: {
   equipamento: EquipamentoTransferencia;
   transferencia: TransferenciaReservada & { registradaEm: string; registradaPorNome: string };
   pode: { confirmar: boolean; cancelar: boolean };
+  aoConcluir?: () => void;
 }) {
   const [aberto, setAberto] = useState<"confirmar" | "cancelar" | null>(null);
   const [chave, setChave] = useState(0);
@@ -685,8 +700,22 @@ export function AvisoTransferenciaReservada({
           ) : null}
         </div>
       ) : null}
-      <DialogoConfirmarTransferencia key={`c${chave}`} aberto={aberto === "confirmar"} aoMudar={mudar("confirmar")} equipamento={equipamento} transferencia={transferencia} />
-      <DialogoCancelarTransferencia key={`x${chave}`} aberto={aberto === "cancelar"} aoMudar={mudar("cancelar")} equipamento={equipamento} transferencia={transferencia} />
+      <DialogoConfirmarTransferencia
+        key={`c${chave}`}
+        aberto={aberto === "confirmar"}
+        aoMudar={mudar("confirmar")}
+        equipamento={equipamento}
+        transferencia={transferencia}
+        aoConcluir={aoConcluir}
+      />
+      <DialogoCancelarTransferencia
+        key={`x${chave}`}
+        aberto={aberto === "cancelar"}
+        aoMudar={mudar("cancelar")}
+        equipamento={equipamento}
+        transferencia={transferencia}
+        aoConcluir={aoConcluir}
+      />
     </div>
   );
 }
