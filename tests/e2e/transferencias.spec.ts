@@ -53,7 +53,7 @@ test.describe("Transferências na ficha do equipamento (Supervisor TI)", () => {
     await abrirMenu(page, "Transferir empresa");
     const e = page.getByTestId("dialogo-transferir-empresa");
     await expect(e.getByRole("note")).toContainText("não modifica quem está com o equipamento: continua com Tatiane Freitas");
-    await expect(e).toContainText("NBI4390C1");
+    await expect(e).toContainText("NBI4390.C1");
     await e.getByLabel(/^Motivo da transferência/).fill("   ");
     await e.getByRole("button", { name: "Continuar" }).click();
     await expect(e.getByText("Selecione a empresa de destino.")).toBeVisible();

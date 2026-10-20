@@ -18,6 +18,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { StatusBadge, type Tom } from "@/components/comum/status-badge";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { Categoria } from "@/lib/inventario";
 import { cn } from "@/lib/utils";
 
@@ -90,6 +91,23 @@ export function BadgeTer({ estado, className }: { estado: EstadoTer | null; clas
     <StatusBadge tom={d.tom} icone={d.icone} className={className}>
       {d.rotulo}
     </StatusBadge>
+  );
+}
+
+/** TER em um ícone (mesma cor da etiqueta) com o texto no tooltip: cabe na linha da tabela. */
+export function TerCompacto({ estado }: { estado: EstadoTer | null }) {
+  const d = estado ? TER[estado] : { tom: "neutro" as Tom, icone: FileQuestion, rotulo: "Sem TER" };
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span tabIndex={0} role="img" aria-label={d.rotulo} className="inline-flex rounded-sm focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none" data-testid="ter-compacto">
+          <StatusBadge tom={d.tom} icone={d.icone} className="w-6 justify-center px-0">
+            <span className="sr-only">{d.rotulo}</span>
+          </StatusBadge>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>{d.rotulo}</TooltipContent>
+    </Tooltip>
   );
 }
 

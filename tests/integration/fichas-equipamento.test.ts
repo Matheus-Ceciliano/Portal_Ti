@@ -37,7 +37,7 @@ describe("ficha do equipamento", () => {
     expect(f.empresa).toMatchObject({ id: HZE.id, nome: HZE.nome });
     expect(f.responsavel).toMatchObject({ id: PESSOAS[3].id, nome: PESSOAS[3].nome, alocacao: "ALO-2026-0009" });
     expect(f.ter).toMatchObject({ numero: "TER-2026-0088", estado: "AGUARDANDO_ASSINATURA", assinadoEm: null });
-    expect(f.carregadores.map((c) => [c.nome, c.situacao])).toEqual([["NBI4512C1", "ALOCADO"]]);
+    expect(f.carregadores.map((c) => [c.nome, c.situacao])).toEqual([["NBI4512.C1", "ALOCADO"]]);
     expect(f.garantiaAte).toBeNull();
     expect(f.fotos).toEqual([]);
 
@@ -67,7 +67,7 @@ describe("detalhe da alocação", () => {
     const alocacao = await prisma.alocacao.findUniqueOrThrow({ where: { numero: "ALO-2026-0009" } });
     const d = await obterAlocacao(supervisor, alocacao.id);
     expect(d).toMatchObject({ estado: "ATIVA", colaborador: { id: PESSOAS[3].id }, empresaColaborador: { id: HZE.id } });
-    expect(d.itens.map((i) => i.ativo.nome ?? i.ativo.patrimonio).sort()).toEqual(["NBI4512", "NBI4512C1", "VLR-004513", "VLR-004530"]);
+    expect(d.itens.map((i) => i.ativo.nome ?? i.ativo.patrimonio).sort()).toEqual(["NBI4512", "NBI4512.C1", "VLR-004513", "VLR-004530"]);
     expect(d.termos).toEqual([expect.objectContaining({ numero: "TER-2026-0088", estado: "AGUARDANDO_ASSINATURA", temPdf: false })]);
     expect(d.historico.filter((h) => h.tipo === "ENTREGA")).toHaveLength(4);
   });

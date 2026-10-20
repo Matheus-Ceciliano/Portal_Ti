@@ -193,6 +193,7 @@ model ContaAcesso {
   fatores                    FatorMfa[]
   codigosAtivacao            CodigoAtivacao[]
   codigosTotpUsados          CodigoTotpUsado[]
+  alocacoesResponsavel       Alocacao[]        @relation("ResponsavelTiAlocacao")
 
   @@map("conta_acesso")
 }
@@ -368,62 +369,287 @@ enum MotivoDesvinculoCarregador {
 /// Equipamento com controle individual. O responsável atual não é coluna: deriva do item de
 /// alocação em aberto de uma alocação ATIVA (entrega física, Q-27).
 model Ativo {
-  id                  String                      @id @default(uuid())
-  categoria           CategoriaAtivo
+  id                   String                      @id @default(uuid())
+  /// Tipo (comportamento no portal: notebook, carregador, kit, peça interna...). O nome exibido vem da categoria do catálogo.
+  categoria            CategoriaAtivo
+  /// Categoria do catálogo (nome, abreviação e regra do identificador automático).
+  categoriaId          String                      @map("categoria_id")
+  categoriaEquipamento CategoriaEquipamento        @relation(fields: [categoriaId], references: [id])
+  /// Notebook (cadastros anteriores ao catálogo de processadores): família escolhida no cadastro. Só histórico.
+  familiaProcessadorId String?                     @map("familia_processador_id")
+  familiaProcessador   FamiliaProcessador?         @relation(fields: [familiaProcessadorId], references: [id])
+  /// Catálogos (Catálogos do Inventário). O texto em marca, modelo, processador e sistemaOperacional
+  /// acompanha o item do catálogo; cadastros antigos guardam o texto original até a próxima edição.
+  marcaId              String?                     @map("marca_id")
+  marcaCatalogo        MarcaEquipamento?           @relation(fields: [marcaId], references: [id], onDelete: Restrict)
+  modeloId             String?                     @map("modelo_id")
+  modeloCatalogo       ModeloEquipamento?          @relation(fields: [modeloId], references: [id], onDelete: Restrict)
+  /// Notebook: o processador define o código do identificador (Intel Core i5-1345U → 5 → NBI5001).
+  processadorId        String?                     @map("processador_id")
+  processadorCatalogo  Processador?                @relation(fields: [processadorId], references: [id], onDelete: Restrict)
+  sistemaOperacionalId String?                     @map("sistema_operacional_id")
+  sistemaCatalogo      SistemaOperacional?         @relation(fields: [sistemaOperacionalId], references: [id], onDelete: Restrict)
+  /// Peça de um kit (KTM01.T, KTM01.M, KTM01.H): o kit é só o agrupador lógico.
+  kitId                String?                     @map("kit_id")
+  kit                  KitEquipamento?             @relation(fields: [kitId], references: [id])
+  parteKit             ParteKit?                   @map("parte_kit")
   /// Nome do dispositivo (ex.: NBI5001), em maiúsculas. Obrigatório para notebook; carregador: <notebook>C<n>.
-  nomeDispositivo     String?                     @unique @map("nome_dispositivo")
+  nomeDispositivo      String?                     @unique @map("nome_dispositivo")
   /// Patrimônio, em maiúsculas. Obrigatório, exceto para carregador (identificado pelo nome).
-  patrimonio          String?                     @unique
+  patrimonio           String?                     @unique
   /// Empresa proprietária. Não muda por alocação a colaborador de outra empresa.
-  empresaId           String                      @map("empresa_id")
-  empresa             Empresa                     @relation(fields: [empresaId], references: [id])
-  marca               String
-  modelo              String
-  numeroSerie         String?                     @unique @map("numero_serie")
-  processador         String?
-  memoriaRam          String?                     @map("memoria_ram")
-  armazenamento       String?
-  sistemaOperacional  String?                     @map("sistema_operacional")
+  empresaId            String                      @map("empresa_id")
+  empresa              Empresa                     @relation(fields: [empresaId], references: [id])
+  marca                String
+  modelo               String
+  numeroSerie          String?                     @unique @map("numero_serie")
+  processador          String?
+  memoriaRam           String?                     @map("memoria_ram")
+  armazenamento        String?
+  sistemaOperacional   String?                     @map("sistema_operacional")
   /// Componente (RAM, SSD, HD): capacidade em GB, tecnologia (RAM), interface (SSD/HD), formato e frequência (RAM).
-  capacidadeGb        Int?                        @map("capacidade_gb")
-  tecnologia          String?
-  interfaceConexao    String?                     @map("interface_conexao")
-  formato             String?
-  frequenciaMhz       Int?                        @map("frequencia_mhz")
-  dataAquisicao       DateTime?                   @map("data_aquisicao") @db.Date
-  garantiaAte         DateTime?                   @map("garantia_ate") @db.Date
-  observacoes         String?
-  situacao            SituacaoAtivo               @default(DISPONIVEL)
-  situacaoDesde       DateTime                    @default(now()) @map("situacao_desde")
+  capacidadeGb         Int?                        @map("capacidade_gb")
+  tecnologia           String?
+  interfaceConexao     String?                     @map("interface_conexao")
+  formato              String?
+  frequenciaMhz        Int?                        @map("frequencia_mhz")
+  dataAquisicao        DateTime?                   @map("data_aquisicao") @db.Date
+  garantiaAte          DateTime?                   @map("garantia_ate") @db.Date
+  observacoes          String?
+  situacao             SituacaoAtivo               @default(DISPONIVEL)
+  situacaoDesde        DateTime                    @default(now()) @map("situacao_desde")
   /// Carregador: notebook a que pertence e posição na sequência (C1, C2...).
-  notebookId          String?                     @map("notebook_id")
-  notebook            Ativo?                      @relation("Carregadores", fields: [notebookId], references: [id])
-  carregadores        Ativo[]                     @relation("Carregadores")
-  sequenciaCarregador Int?                        @map("sequencia_carregador")
+  notebookId           String?                     @map("notebook_id")
+  notebook             Ativo?                      @relation("Carregadores", fields: [notebookId], references: [id])
+  carregadores         Ativo[]                     @relation("Carregadores")
+  sequenciaCarregador  Int?                        @map("sequencia_carregador")
   /// Carregador trocado, perdido ou com defeito: o vínculo é encerrado e preservado no histórico.
-  desvinculadoEm      DateTime?                   @map("desvinculado_em")
-  motivoDesvinculo    MotivoDesvinculoCarregador? @map("motivo_desvinculo")
+  desvinculadoEm       DateTime?                   @map("desvinculado_em")
+  motivoDesvinculo     MotivoDesvinculoCarregador? @map("motivo_desvinculo")
   /// O mesmo envio repetido (duplo clique, nova tentativa) devolve o cadastro já feito.
-  chaveRequisicao     String?                     @unique @map("chave_requisicao")
-  criadoPorNome       String?                     @map("criado_por_nome")
-  criadoEm            DateTime                    @default(now()) @map("criado_em")
-  atualizadoEm        DateTime                    @default(now()) @updatedAt @map("atualizado_em")
-  fotos               FotoAtivo[]
-  movimentacoes       MovimentacaoAtivo[]
-  itensAlocacao       ItemAlocacao[]
-  manutencoes         Manutencao[]
-  transferencias      Transferencia[]
+  chaveRequisicao      String?                     @unique @map("chave_requisicao")
+  criadoPorNome        String?                     @map("criado_por_nome")
+  criadoEm             DateTime                    @default(now()) @map("criado_em")
+  atualizadoEm         DateTime                    @default(now()) @updatedAt @map("atualizado_em")
+  fotos                FotoAtivo[]
+  movimentacoes        MovimentacaoAtivo[]
+  itensAlocacao        ItemAlocacao[]
+  manutencoes          Manutencao[]
+  transferencias       Transferencia[]
   /// Notebook: peças da configuração (original e componentes instalados) e intervenções.
-  pecasConfiguracao   PecaConfiguracao[]          @relation("PecasEquipamento")
-  intervencoes        IntervencaoConfiguracao[]
+  pecasConfiguracao    PecaConfiguracao[]          @relation("PecasEquipamento")
+  intervencoes         IntervencaoConfiguracao[]
   /// Componente: onde já esteve (ou está) instalado.
-  instalacoes         PecaConfiguracao[]          @relation("PecasComponente")
+  instalacoes          PecaConfiguracao[]          @relation("PecasComponente")
 
   @@unique([notebookId, sequenciaCarregador])
+  @@unique([kitId, parteKit])
+  @@index([categoriaId])
+  @@index([marcaId])
+  @@index([modeloId])
+  @@index([processadorId])
+  @@index([sistemaOperacionalId])
   @@index([empresaId])
   @@index([situacao])
   @@index([categoria])
   @@map("ativo")
+}
+
+/// Regra do identificador automático da categoria.
+enum RegraIdentificador {
+  /// Notebook: prefixo + código da família do processador + sequência por família (NBI5001).
+  PROCESSADOR
+  /// Carregador: nome do notebook + C + sequência por notebook (NBI5001C1).
+  CARREGADOR
+  /// Kit: prefixo + sequência do kit; cada peça recebe .T, .M ou .H (KTM01.T).
+  KIT
+  /// Prefixo + sequência (MNT001).
+  SEQUENCIAL
+  /// Sem identificador automático: o patrimônio (ou um nome informado) identifica.
+  NENHUMA
+}
+
+enum ParteKit {
+  TECLADO
+  MOUSE
+  RECEPTOR
+}
+
+/// Catálogo de categorias do inventário. As do catálogo inicial ("sistema") não mudam de tipo
+/// nem de regra e não são excluídas; nome, abreviação e situação podem mudar. Mudar a
+/// abreviação vale só para os próximos equipamentos: os identificadores existentes ficam.
+model CategoriaEquipamento {
+  id            String                        @id @default(uuid())
+  /// Código das categorias do catálogo inicial (igual ao tipo); nulo nas criadas pela TI.
+  codigo        String?                       @unique
+  nome          String                        @unique
+  tipo          CategoriaAtivo
+  regra         RegraIdentificador
+  prefixo       String?                       @unique
+  digitos       Int                           @default(3)
+  ativa         Boolean                       @default(true)
+  sistema       Boolean                       @default(false)
+  ordem         Int                           @default(100)
+  criadaEm      DateTime                      @default(now()) @map("criada_em")
+  criadaPorNome String?                       @map("criada_por_nome")
+  atualizadaEm  DateTime                      @default(now()) @updatedAt @map("atualizada_em")
+  ativos        Ativo[]
+  kits          KitEquipamento[]
+  prefixos      HistoricoPrefixoCategoria[]
+  modelos       ModeloEquipamento[]
+  sistemas      SistemaOperacionalCategoria[]
+
+  @@map("categoria_equipamento")
+}
+
+/// Abreviações anteriores de cada categoria (os equipamentos já identificados mantêm a antiga).
+model HistoricoPrefixoCategoria {
+  id              String               @id @default(uuid())
+  categoriaId     String               @map("categoria_id")
+  categoria       CategoriaEquipamento @relation(fields: [categoriaId], references: [id])
+  prefixoAnterior String?              @map("prefixo_anterior")
+  prefixoNovo     String?              @map("prefixo_novo")
+  digitosAnterior Int                  @map("digitos_anterior")
+  digitosNovo     Int                  @map("digitos_novo")
+  alteradoEm      DateTime             @default(now()) @map("alterado_em")
+  alteradoPorNome String               @map("alterado_por_nome")
+
+  @@index([categoriaId, alteradoEm])
+  @@map("historico_prefixo_categoria")
+}
+
+/// Famílias de processador usadas antes do catálogo de processadores (cada uma virou um item do
+/// catálogo, com o mesmo código). Mantida só como histórico dos cadastros antigos.
+model FamiliaProcessador {
+  id            String   @id @default(uuid())
+  nome          String   @unique
+  codigo        String   @unique
+  ativa         Boolean  @default(true)
+  criadaEm      DateTime @default(now()) @map("criada_em")
+  criadaPorNome String?  @map("criada_por_nome")
+  ativos        Ativo[]
+
+  @@map("familia_processador")
+}
+
+/**
+ * Catálogos do Inventário. "chave" é o texto normalizado (sem acento, minúsculas, espaços
+ * simples; função chave_catalogo no banco): Dell e DELL são a mesma marca. Itens com
+ * equipamentos não são excluídos; a inativação só os tira das opções de novos cadastros.
+ */
+
+model MarcaEquipamento {
+  id            String              @id @default(uuid())
+  nome          String
+  chave         String              @unique
+  ativa         Boolean             @default(true)
+  criadaEm      DateTime            @default(now()) @map("criada_em")
+  criadaPorNome String?             @map("criada_por_nome")
+  atualizadaEm  DateTime            @default(now()) @updatedAt @map("atualizada_em")
+  modelos       ModeloEquipamento[]
+  ativos        Ativo[]
+
+  @@map("marca_equipamento")
+}
+
+/// Modelo de uma marca para uma categoria (Notebook · Dell · Latitude 5440).
+model ModeloEquipamento {
+  id            String               @id @default(uuid())
+  nome          String
+  chave         String
+  marcaId       String               @map("marca_id")
+  marca         MarcaEquipamento     @relation(fields: [marcaId], references: [id])
+  categoriaId   String               @map("categoria_id")
+  categoria     CategoriaEquipamento @relation(fields: [categoriaId], references: [id])
+  ativa         Boolean              @default(true)
+  criadaEm      DateTime             @default(now()) @map("criada_em")
+  criadaPorNome String?              @map("criada_por_nome")
+  atualizadaEm  DateTime             @default(now()) @updatedAt @map("atualizada_em")
+  ativos        Ativo[]
+
+  @@unique([marcaId, categoriaId, chave])
+  @@index([categoriaId])
+  @@map("modelo_equipamento")
+}
+
+/// Processador: modelo completo (Intel Core i5-1345U) e o código de nomenclatura do notebook
+/// (5 → NBI5001). Sem código, o processador não gera identificador até a TI configurá-lo.
+model Processador {
+  id                 String   @id @default(uuid())
+  fabricante         String?
+  familia            String?
+  modelo             String
+  chave              String   @unique
+  codigoNomenclatura String?  @map("codigo_nomenclatura")
+  ativa              Boolean  @default(true)
+  criadaEm           DateTime @default(now()) @map("criada_em")
+  criadaPorNome      String?  @map("criada_por_nome")
+  atualizadaEm       DateTime @default(now()) @updatedAt @map("atualizada_em")
+  ativos             Ativo[]
+
+  @@map("processador")
+}
+
+/// Sistema operacional (Windows 11 + Pro). Com categorias associadas, só aparece para elas.
+model SistemaOperacional {
+  id            String                        @id @default(uuid())
+  nome          String
+  versao        String?
+  chave         String                        @unique
+  ativa         Boolean                       @default(true)
+  criadaEm      DateTime                      @default(now()) @map("criada_em")
+  criadaPorNome String?                       @map("criada_por_nome")
+  atualizadaEm  DateTime                      @default(now()) @updatedAt @map("atualizada_em")
+  categorias    SistemaOperacionalCategoria[]
+  ativos        Ativo[]
+
+  @@map("sistema_operacional")
+}
+
+model SistemaOperacionalCategoria {
+  sistemaId   String               @map("sistema_id")
+  sistema     SistemaOperacional   @relation(fields: [sistemaId], references: [id], onDelete: Cascade)
+  categoriaId String               @map("categoria_id")
+  categoria   CategoriaEquipamento @relation(fields: [categoriaId], references: [id])
+
+  @@id([sistemaId, categoriaId])
+  @@map("sistema_operacional_categoria")
+}
+
+enum TipoPadraoMemoria {
+  TECNOLOGIA
+  FORMATO
+  FREQUENCIA
+}
+
+/// Padrões técnicos das memórias RAM (DDR4, SO-DIMM, 3200 MHz): características, não peças físicas.
+model PadraoMemoria {
+  id            String            @id @default(uuid())
+  tipo          TipoPadraoMemoria
+  valor         String
+  chave         String
+  ativa         Boolean           @default(true)
+  ordem         Int               @default(100)
+  criadaEm      DateTime          @default(now()) @map("criada_em")
+  criadaPorNome String?           @map("criada_por_nome")
+
+  @@unique([tipo, chave])
+  @@map("padrao_memoria")
+}
+
+/// Kit de teclado e mouse: agrupador lógico (KTM01) das peças físicas cadastradas juntas.
+model KitEquipamento {
+  id              String               @id @default(uuid())
+  codigo          String               @unique
+  categoriaId     String               @map("categoria_id")
+  categoria       CategoriaEquipamento @relation(fields: [categoriaId], references: [id])
+  criadoEm        DateTime             @default(now()) @map("criado_em")
+  criadoPorNome   String               @map("criado_por_nome")
+  /// O mesmo envio repetido devolve o kit já cadastrado.
+  chaveRequisicao String?              @unique @map("chave_requisicao")
+  partes          Ativo[]
+
+  @@map("kit_equipamento")
 }
 
 enum TipoFoto {
@@ -460,6 +686,9 @@ model FotoAtivo {
   itemDevolucao   ItemDevolucao? @relation(fields: [itemDevolucaoId], references: [id])
   enviadaPorNome  String         @map("enviada_por_nome")
   enviadaEm       DateTime       @default(now()) @map("enviada_em")
+  /// Foto do cadastro retirada na edição: some das galerias, mas o arquivo e o registro ficam.
+  removidaEm      DateTime?      @map("removida_em")
+  removidaPorNome String?        @map("removida_por_nome")
 
   @@index([ativoId])
   @@map("foto_ativo")
@@ -519,7 +748,8 @@ enum EstadoAlocacao {
 
 model Alocacao {
   id                   String         @id @default(uuid())
-  /// Número legível (ALO-AAAA-NNNN).
+  /// Número legível: AL0001, AL0002... (sequência única, sem reinício anual). As anteriores
+  /// mantêm o formato antigo (ALO-AAAA-NNNN) até haver migração específica autorizada.
   numero               String         @unique
   colaboradorId        String         @map("colaborador_id")
   colaborador          Colaborador    @relation(fields: [colaboradorId], references: [id])
@@ -534,6 +764,12 @@ model Alocacao {
   entreguePorNome      String?        @map("entregue_por_nome")
   observacoes          String?
   chaveRequisicao      String?        @unique @map("chave_requisicao")
+  /// Responsável TI escolhido na alocação (membro da TI ativo e autorizado); nulo nas anteriores.
+  responsavelTiContaId String?        @map("responsavel_ti_conta_id")
+  responsavelTi        ContaAcesso?   @relation("ResponsavelTiAlocacao", fields: [responsavelTiContaId], references: [id])
+  responsavelTiNome    String?        @map("responsavel_ti_nome")
+  /// Quem registrou a operação no portal (pode ser diferente do responsável TI).
+  criadaPorContaId     String?        @map("criada_por_conta_id")
   criadaPorNome        String         @map("criada_por_nome")
   criadaEm             DateTime       @default(now()) @map("criada_em")
   atualizadaEm         DateTime       @default(now()) @updatedAt @map("atualizada_em")

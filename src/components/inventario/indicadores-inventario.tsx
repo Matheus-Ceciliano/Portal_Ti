@@ -1,12 +1,13 @@
-import { Boxes, CheckCircle2, CircleDashed, Hand, type LucideIcon } from "lucide-react";
+import { Boxes, CheckCircle2, CircleDashed, Hand, Link2, MemoryStick, type LucideIcon } from "lucide-react";
 import Link from "next/link";
 import { useId } from "react";
 import { hrefCom, type Parametros } from "@/components/comum/tabela";
-import { ROTULO_CATEGORIA, ROTULO_SITUACAO, SITUACOES, type Situacao } from "@/lib/inventario";
+import { ROTULO_SITUACAO, SITUACOES_COMPONENTE, SITUACOES_EQUIPAMENTO, type Situacao } from "@/lib/inventario";
 import { cn } from "@/lib/utils";
 import type { ResultadoInventario } from "@/server/modulos/inventario";
 
 type Indicadores = ResultadoInventario["indicadores"];
+export type GrupoInventario = "equipamentos" | "componentes";
 
 /** Indicador ativo quando a URL já tem exatamente o filtro dele. */
 const ativo = (parametros: Parametros, filtro: Parametros) => Object.entries(filtro).every(([k, v]) => parametros[k] === v);
@@ -24,13 +25,28 @@ type Cartao = { titulo: string; valor: number; icone: LucideIcon; tom: string; f
 /**
  * Os quatro números do topo, do banco, com empresa, tipo, marca e pesquisa e sem o filtro de
  * situação (escolher "Disponíveis" não zera os demais). O total limpa o filtro de situação.
+ * Equipamentos e componentes têm números separados (notebook não se soma com memória).
  */
-export function CartoesInventario({ indicadores: i, base, parametros }: { indicadores: Indicadores; base: string; parametros: Parametros }) {
+export function CartoesInventario({
+  indicadores: i,
+  base,
+  parametros,
+  grupo = "equipamentos",
+}: {
+  indicadores: Indicadores;
+  base: string;
+  parametros: Parametros;
+  grupo?: GrupoInventario;
+}) {
+  const componentes = grupo === "componentes";
   const cartoes: Cartao[] = [
     { titulo: "Disponíveis", valor: i.disponiveis, icone: CircleDashed, tom: "text-info", filtro: { situacao: "DISPONIVEL" } },
-    { titulo: "Alocados", valor: i.alocados, icone: CheckCircle2, tom: "text-sucesso", filtro: { situacao: "ALOCADO" } },
+    componentes
+      ? { titulo: "Instalados", valor: i.instalados, icone: Link2, tom: "text-info", filtro: { situacao: "INSTALADO" } }
+      : { titulo: "Alocados", valor: i.alocados, icone: CheckCircle2, tom: "text-sucesso", filtro: { situacao: "ALOCADO" } },
     { titulo: "Em manutenção", valor: i.manutencao, icone: Hand, tom: "text-manual", filtro: { situacao: "MANUTENCAO" } },
   ];
+  const tituloTotal = componentes ? "Total de componentes" : "Total de equipamentos";
   const classe = cn(
     "flex h-full w-full items-center justify-between gap-3 rounded-lg border bg-card px-3 py-2 text-left",
     "transition-[border-color,background-color] duration-150 hover:border-foreground/25 hover:bg-muted/60 motion-reduce:transition-none",
@@ -48,8 +64,8 @@ export function CartoesInventario({ indicadores: i, base, parametros }: { indica
   return (
     <ul className="mb-3 grid grid-cols-2 gap-2 lg:grid-cols-4" data-testid="indicadores-inventario">
       <li className="flex">
-        <Link href={hrefCom(base, { ...parametros, pagina: undefined }, { situacao: undefined })} aria-label={`Total de equipamentos: ${i.total}. Mostrar todas as situações`} className={classe}>
-          {conteudo("Total de equipamentos", i.total, Boxes, "text-muted-foreground")}
+        <Link href={hrefCom(base, { ...parametros, pagina: undefined }, { situacao: undefined })} aria-label={`${tituloTotal}: ${i.total}. Mostrar todas as situações`} className={classe}>
+          {conteudo(tituloTotal, i.total, componentes ? MemoryStick : Boxes, "text-muted-foreground")}
         </Link>
       </li>
       {cartoes.map((c) => {
@@ -78,6 +94,7 @@ const COR_SITUACAO: Record<Situacao, string> = {
   RESERVADO: "bg-atencao",
   ALOCADO: "bg-sucesso",
   MANUTENCAO: "bg-manual",
+  INSTALADO: "bg-chart-1",
   DEVOLVIDO_EM_AVALIACAO: "bg-atencao/60",
   BAIXADO: "bg-muted-foreground",
 };
@@ -165,6 +182,7 @@ export function VisaoGeralInventario({
   totalLista,
   base,
   parametros,
+  grupo = "equipamentos",
 }: {
   id: string;
   aberta: boolean;
@@ -172,6 +190,7 @@ export function VisaoGeralInventario({
   totalLista: number;
   base: string;
   parametros: Parametros;
+  grupo?: GrupoInventario;
 }) {
   const porSituacao: Record<Situacao, number> = {
     DISPONIVEL: i.disponiveis,
@@ -180,21 +199,23 @@ export function VisaoGeralInventario({
     MANUTENCAO: i.manutencao,
     DEVOLVIDO_EM_AVALIACAO: i.emAvaliacao,
     BAIXADO: i.baixados,
+    INSTALADO: i.instalados,
   };
+  const situacoes = grupo === "componentes" ? SITUACOES_COMPONENTE : SITUACOES_EQUIPAMENTO;
   const comum = { base, parametros };
   return (
     <section id={id} hidden={!aberta} aria-label="Visão geral do inventário" className="mb-3 grid gap-x-8 gap-y-4 rounded-xl border bg-card p-3 md:grid-cols-2 lg:p-4" data-testid="visao-geral-inventario">
       <Ranking
         titulo="Por situação"
         total={i.total}
-        itens={SITUACOES.map((s) => ({ chave: s, rotulo: ROTULO_SITUACAO[s], total: porSituacao[s], filtro: { situacao: s }, cor: COR_SITUACAO[s] }))}
+        itens={situacoes.map((s) => ({ chave: s, rotulo: ROTULO_SITUACAO[s], total: porSituacao[s], filtro: { situacao: s }, cor: COR_SITUACAO[s] }))}
         {...comum}
       />
       <Ranking
         titulo="Por tipo"
         total={totalLista}
         itens={comRestante(
-          i.porTipo.map((t) => ({ chave: t.categoria, rotulo: ROTULO_CATEGORIA[t.categoria], total: t.total, filtro: { tipo: t.categoria } })),
+          i.porTipo.map((t) => ({ chave: t.categoriaId, rotulo: t.nome, total: t.total, filtro: { tipo: t.categoriaId } })),
           totalLista,
           6,
           "Outros tipos",

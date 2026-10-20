@@ -1,4 +1,4 @@
-// TEMPORÁRIO: capturas para revisão visual da lista do Inventário; será removido.
+// TEMPORÁRIO: capturas para revisão visual do Inventário e dos componentes internos; será removido.
 import { expect, test, type Page } from "@playwright/test";
 import { estado } from "./apoio";
 
@@ -29,10 +29,27 @@ for (const [largura, altura] of [
     expect(await semRolagemHorizontal(page)).toBe(true);
     await page.screenshot({ path: `test-results/capturas/r-visao-${largura}.png`, fullPage: true });
 
+    await page.goto("/ti/inventario?grupo=componentes");
+    await page.waitForTimeout(400);
+    expect(await semRolagemHorizontal(page)).toBe(true);
+    await page.screenshot({ path: `test-results/capturas/c-lista-${largura}.png`, fullPage: true });
+
+    await page.goto("/ti/inventario?busca=NBI5101");
+    await page.getByRole("link", { name: "NBI5101", exact: true }).first().click();
+    await expect(page.getByTestId("componentes-internos")).toBeVisible();
+    await page.getByRole("button", { name: /^Histórico de intervenções/ }).click();
+    await page.waitForTimeout(400);
+    expect(await semRolagemHorizontal(page)).toBe(true);
+    await page.screenshot({ path: `test-results/capturas/c-ficha-${largura}.png`, fullPage: true });
+    await page.getByTestId("adicionar-componente").click();
+    await page.waitForTimeout(500);
+    await page.screenshot({ path: `test-results/capturas/c-dialogo-${largura}.png` });
+    await page.keyboard.press("Escape");
+
     await page.emulateMedia({ colorScheme: "dark" });
-    await page.goto("/ti/inventario?visao=geral");
+    await page.goto("/ti/inventario?grupo=componentes&visao=geral");
     await page.evaluate(() => document.documentElement.classList.add("dark"));
     await page.waitForTimeout(400);
-    await page.screenshot({ path: `test-results/capturas/r-escuro-${largura}.png`, fullPage: true });
+    await page.screenshot({ path: `test-results/capturas/c-escuro-${largura}.png`, fullPage: true });
   });
 }

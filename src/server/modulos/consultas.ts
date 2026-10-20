@@ -3,11 +3,12 @@ import { obterConectores } from "@/integrations/fabrica";
 import type { CenarioSimulacao } from "@/integrations/core/tipos";
 import type { Ator } from "@/server/authz/ator";
 import { executarCasoDeUso, exigirPermissao } from "@/server/authz/exigir";
-import { FORA_DE_EQUIPAMENTOS, ROTULO_CATEGORIA } from "@/lib/inventario";
+import { FORA_DE_EQUIPAMENTOS } from "@/lib/inventario";
 import { nomeDaPessoa } from "@/server/dados-ficticios/cadastros";
 import { CHAMADOS, TUTORIAIS } from "@/server/dados-ficticios/operacao";
 import { prisma } from "@/server/db";
 import { listarMeusDocumentos } from "./termos";
+import { rotuloTipo, SELECAO_TIPO } from "./inventario-base";
 
 export { listarMeusDocumentos, listarTermos } from "./termos";
 
@@ -24,14 +25,14 @@ export async function listarMeusEquipamentos(ator: Ator) {
       where: { aberto: true, alocacao: { colaboradorId: ator.colaboradorId, estado: { in: ["ATIVA", "RESERVADA"] } } },
       orderBy: { alocacao: { criadaEm: "desc" } },
       select: {
-        ativo: { select: { id: true, categoria: true, nomeDispositivo: true, patrimonio: true, marca: true, modelo: true } },
+        ativo: { select: { id: true, categoria: true, ...SELECAO_TIPO, nomeDispositivo: true, patrimonio: true, marca: true, modelo: true } },
         alocacao: { select: { estado: true, entregueEm: true, previstaPara: true, criadaEm: true } },
       },
     });
     return itens.map((i) => ({
       id: i.ativo.id,
       categoria: i.ativo.categoria,
-      tipo: ROTULO_CATEGORIA[i.ativo.categoria],
+      tipo: rotuloTipo(i.ativo),
       nome: i.ativo.nomeDispositivo,
       patrimonio: i.ativo.patrimonio,
       modelo: `${i.ativo.marca} ${i.ativo.modelo}`,

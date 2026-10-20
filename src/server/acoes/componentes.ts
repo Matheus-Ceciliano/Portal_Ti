@@ -6,7 +6,6 @@ import { obterSessao } from "@/server/auth/sessao";
 import { mensagemDeErro } from "@/server/authz/exigir";
 import {
   componentesDisponiveis,
-  definirConfiguracaoOriginal,
   instalarComponente,
   removerComponente,
   substituirComponente,
@@ -47,8 +46,8 @@ const dadosComponente = z.object({
   interfaceConexao: texto,
   formato: texto,
   frequenciaMhz: numero,
-  marca: z.string().max(120),
-  modelo: z.string().max(160),
+  marcaId: z.string().max(40).nullable().optional(),
+  modeloId: z.string().max(40).nullable().optional(),
   numeroSerie: texto,
 });
 
@@ -78,30 +77,8 @@ export async function acaoIntervencaoComponente(entrada: z.input<typeof esquemaI
     atualizarTelas(resto.notebookId);
     const registro = r.registrado ? ` Peça removida registrada como ${r.registrado}.` : "";
     const mensagem =
-      modo === "INSTALAR" ? `${r.instalado} instalado.` : modo === "REMOVER" ? `Componente removido.${registro}` : `Componente substituído por ${r.instalado}.${registro}`;
+      modo === "INSTALAR" ? `${r.instalado} vinculado ao notebook.` : modo === "REMOVER" ? `Componente removido.${registro}` : `Componente substituído por ${r.instalado}.${registro}`;
     return { ok: true, mensagem };
-  } catch (erro) {
-    return { ok: false, erro: mensagemDeErro(erro) };
-  }
-}
-
-const esquemaOriginal = z.object({
-  notebookId: z.uuid(),
-  configuracao: z.object({
-    memoria: z.object({ capacidadeGb: numero, tecnologia: texto }).nullable(),
-    armazenamento: z.array(z.object({ tipo: z.string().max(10), capacidadeGb: numero, interfaceConexao: texto })).max(4),
-  }),
-});
-
-export async function acaoConfiguracaoOriginal(entrada: z.input<typeof esquemaOriginal>): Promise<Resultado> {
-  const ator = await atorAtual();
-  if (!ator) return { ok: false, erro: SESSAO };
-  const dados = esquemaOriginal.safeParse(entrada);
-  if (!dados.success) return { ok: false, erro: "Revise a configuração." };
-  try {
-    const r = await definirConfiguracaoOriginal(ator, dados.data);
-    atualizarTelas(dados.data.notebookId);
-    return { ok: true, mensagem: r.alterada ? "Configuração original registrada." : "A configuração já estava assim." };
   } catch (erro) {
     return { ok: false, erro: mensagemDeErro(erro) };
   }

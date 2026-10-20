@@ -30,13 +30,51 @@ test.describe("Supervisor TI", () => {
     expect([...hosts].filter((h) => h !== "localhost")).toEqual([]);
   });
 
-  test("navegação mostra a administração completa", async ({ page }) => {
-    await page.goto("/ti");
-    const nav = page.getByRole("navigation", { name: "Navegação da área de TI" }).first();
-    for (const item of ["Dashboard", "Empresas", "Pessoas", "Inventário", "TER", "TDV", "Chamados", "Tutoriais", "Integrações", "Auditoria", "Configurações"]) {
-      await expect(nav.getByRole("link", { name: new RegExp(`^${item}`) })).toBeVisible();
+  test("barra lateral sem rolagem: menu principal fixo e Mais opções em painel flutuante", async ({ page }) => {
+    const painel = page.getByRole("dialog", { name: "Mais opções" });
+    const mais = page.getByTestId("mais-opcoes");
+    for (const [largura, altura] of [
+      [1366, 657],
+      [1280, 609],
+    ] as const) {
+      await page.setViewportSize({ width: largura, height: altura });
+      await page.goto("/ti");
+      const nav = page.getByRole("navigation", { name: "Navegação da área de TI" }).first();
+      for (const item of ["Dashboard", "Empresas", "Pessoas", "Inventário", "Alocações", "TER", "Chamados", "Tutoriais"]) {
+        await expect(nav.getByRole("link", { name: new RegExp(`^${item}`) })).toBeInViewport();
+      }
+      for (const item of ["TDV", "Integrações", "Auditoria", "Configurações"]) {
+        await expect(nav.getByRole("link", { name: item })).toHaveCount(0);
+      }
+      expect(await nav.evaluate((el) => el.parentElement!.scrollHeight <= el.parentElement!.clientHeight), `${largura}x${altura}`).toBe(true);
+      await expect(mais).toBeInViewport();
+
+      await mais.click();
+      await expect(painel).toBeVisible();
+      for (const item of ["TDV", "Integrações", "Auditoria", "Configurações"]) {
+        await expect(painel.getByRole("link", { name: item })).toBeVisible();
+      }
+      // À direita da barra (240 px) e dentro da tela.
+      const caixa = (await painel.boundingBox())!;
+      expect(caixa.x).toBeGreaterThanOrEqual(240);
+      expect(caixa.y).toBeGreaterThanOrEqual(0);
+      expect(caixa.y + caixa.height).toBeLessThanOrEqual(altura);
+      await page.keyboard.press("Escape");
+      await expect(painel).toBeHidden();
+      await mais.click();
+      await expect(painel).toBeVisible();
+      await page.getByRole("heading", { level: 1 }).click();
+      await expect(painel).toBeHidden();
     }
-    await page.goto("/ti/configuracoes");
+
+    await mais.click();
+    await painel.getByRole("link", { name: "TDV" }).click();
+    await expect(page).toHaveURL(/\/ti\/documentos\/tdv$/);
+    await expect(painel).toBeHidden();
+    await expect(mais).toContainText("TDV"); // página ativa indicada no botão
+    await mais.click();
+    await expect(painel.getByRole("link", { name: "TDV" })).toHaveAttribute("aria-current", "page");
+    await painel.getByRole("link", { name: "Configurações" }).click();
     await expect(page.getByRole("heading", { name: "Atribuir perfil de TI" })).toBeVisible();
   });
 
@@ -66,6 +104,15 @@ test.describe("Supervisor TI", () => {
       await gaveta.getByRole("link", { name: /^Inventário/ }).click();
       await expect(page).toHaveURL(/\/ti\/inventario/);
       await expect(gaveta).toBeHidden();
+      // "Mais opções" vira uma seção recolhível dentro da gaveta.
+      await page.getByTestId("abrir-menu").click();
+      await expect(gaveta.getByRole("link", { name: "TDV" })).toHaveCount(0);
+      await gaveta.getByRole("button", { name: "Mais opções" }).click();
+      await gaveta.getByRole("link", { name: "TDV" }).click();
+      await expect(page).toHaveURL(/\/ti\/documentos\/tdv$/);
+      await page.getByTestId("abrir-menu").click();
+      await expect(gaveta.getByRole("button", { name: "Mais opções" })).toHaveAttribute("aria-expanded", "true");
+      await expect(gaveta.getByRole("link", { name: "TDV" })).toHaveAttribute("aria-current", "page");
     });
   }
 });

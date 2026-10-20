@@ -46,6 +46,7 @@ const esquemaNova = z.object({
   colaboradorId: z.uuid("Selecione o colaborador."),
   ativoIds: z.array(z.uuid()).min(1, "Selecione ao menos um equipamento.").max(30),
   modo: z.enum(["ENTREGAR", "RESERVAR"]),
+  responsavelTiContaId: z.string().min(1, "Selecione o responsável TI.").max(64),
   data: z.string().max(40).optional(),
   observacoes: z.string().max(1000).optional(),
   chaveRequisicao: z.uuid().optional(),

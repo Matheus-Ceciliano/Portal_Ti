@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import type { MotivoEncerramentoItem, Prisma, TipoMovimentacao } from "@/generated/prisma/client";
-import { identificadorComponente, type TipoComponente } from "@/lib/componentes";
+import { ROTULO_PARTE, type ParteKit } from "@/lib/identificacao";
 import {
   FOTO_TAMANHO_MAXIMO,
   FOTOS_POR_ENVIO,
+  numeroAlocacao,
   numeroDocumento,
   ROTULO_SITUACAO,
   TIPOS_FOTO,
@@ -46,14 +47,21 @@ export async function proximoNumero(tx: ClienteBanco, prefixo: string, quando = 
   return numeroDocumento(prefixo, ano, Number(valor));
 }
 
-/** Próximo identificador de componente (RAM001, SSD001, HDD001...), atômico e sem reaproveitar números. */
-export async function proximoIdentificadorComponente(tx: ClienteBanco, tipo: TipoComponente) {
-  const chave = `COMPONENTE-${tipo}`;
+/**
+ * Número da alocação (AL0001, AL0002...): uma sequência única no PostgreSQL, sem reinício
+ * anual. O contador parte do maior número já usado — inclusive no formato antigo
+ * (ALO-AAAA-NNNN) —, então nenhum número se repete nem é reaproveitado. O índice único da
+ * coluna é a última barreira contra cadastros simultâneos.
+ */
+export async function proximoNumeroAlocacao(tx: ClienteBanco) {
+  const [{ n }] = await tx.$queryRaw<{ n: number }[]>`
+    SELECT COALESCE(MAX(COALESCE(substring("numero" from '^AL([0-9]+)$'), substring("numero" from '^ALO-[0-9]{4}-([0-9]+)$'))::bigint), 0)::int AS n
+    FROM "alocacao"`;
   const [{ valor }] = await tx.$queryRaw<{ valor: number }[]>`
-    INSERT INTO "contador_documento" (chave, valor) VALUES (${chave}, 1)
-    ON CONFLICT (chave) DO UPDATE SET valor = "contador_documento".valor + 1
+    INSERT INTO "contador_documento" (chave, valor) VALUES ('AL', ${n + 1})
+    ON CONFLICT (chave) DO UPDATE SET valor = GREATEST("contador_documento".valor + 1, ${n + 1})
     RETURNING valor`;
-  return identificadorComponente(tipo, Number(valor));
+  return numeroAlocacao(Number(valor));
 }
 
 /** Mesma marca escrita de outro jeito ("dell", "DELL") usa a grafia já cadastrada. */
@@ -147,6 +155,13 @@ export async function cancelarTransferenciaPendente(tx: ClienteBanco, ator: Ator
   });
   return p;
 }
+
+/** Seleção para o rótulo do tipo: nome da categoria no catálogo e a peça do kit. */
+export const SELECAO_TIPO = { categoriaEquipamento: { select: { nome: true } }, parteKit: true } as const;
+
+/** Rótulo do tipo exibido em todos os módulos: "Monitor", "Kit teclado e mouse · Teclado"... */
+export const rotuloTipo = (a: { categoriaEquipamento: { nome: string }; parteKit: ParteKit | null }) =>
+  a.parteKit ? `${a.categoriaEquipamento.nome} · ${ROTULO_PARTE[a.parteKit]}` : a.categoriaEquipamento.nome;
 
 /** Identificação curta do equipamento para mensagens: nome do dispositivo ou patrimônio. */
 export const rotuloAtivo = (a: { nomeDispositivo: string | null; patrimonio: string | null; modelo?: string }) =>

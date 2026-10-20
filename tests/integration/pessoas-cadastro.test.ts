@@ -342,7 +342,7 @@ describe("listagem e detalhes", () => {
 
     const detalhe = await obterDetalhePessoa(supervisor, PESSOAS[7].id);
     expect(detalhe.equipamentos.entregues.map((e) => e.patrimonio)).toEqual([]);
-    expect(detalhe.equipamentos.reservados.map((e) => e.patrimonio).sort()).toEqual(["NBI4644C1", "VLR-004644"]); // notebook e carregador
+    expect(detalhe.equipamentos.reservados.map((e) => e.patrimonio).sort()).toEqual(["NBI4644.C1", "VLR-004644"]); // notebook e carregador
   });
 
   it("colaborador não lista pessoas e só vê o próprio detalhe", async () => {

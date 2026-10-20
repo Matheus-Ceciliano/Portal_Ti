@@ -21,6 +21,8 @@ export default async function PaginaAlocacoes({
     empresaProprietaria: texto(sp.empresaProprietaria),
     periodo: texto(sp.periodo),
     situacao: texto(sp.situacao),
+    ordenar: texto(sp.ordenar),
+    direcao: texto(sp.direcao),
     pagina: texto(sp.pagina),
   };
   const [resultado, empresas, colaboradores] = await Promise.all([
@@ -31,6 +33,8 @@ export default async function PaginaAlocacoes({
       empresaProprietariaId: parametros.empresaProprietaria,
       periodo: (["30", "90", "365"] as const).find((p) => p === parametros.periodo),
       estado: ESTADOS_ALOCACAO.find((e) => e === parametros.situacao),
+      ordenar: (["numero", "colaborador", "data", "situacao"] as const).find((o) => o === parametros.ordenar),
+      direcao: parametros.direcao === "asc" ? "asc" : "desc",
       pagina: Number(parametros.pagina) || 1,
     }),
     listarEmpresas(ator),

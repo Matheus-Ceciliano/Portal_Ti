@@ -9,12 +9,12 @@ import { navegacaoTi } from "@/server/navegacao";
 export default async function LayoutTi({ children }: { children: React.ReactNode }) {
   // Defesa em profundidade: cada página e cada ação também verifica a permissão.
   const ator = await exigirAreaTi();
-  const grupos = navegacaoTi(ator, {
+  const navegacao = navegacaoTi(ator, {
     chamadosSemResponsavel: CHAMADOS.filter((c) => c.estado !== "RESOLVIDO" && !c.responsavelId).length,
   });
   return (
     <CascaTi
-      grupos={grupos}
+      navegacao={navegacao}
       faixa={<FaixaAmbiente />}
       usuario={{
         nome: ator.nome,

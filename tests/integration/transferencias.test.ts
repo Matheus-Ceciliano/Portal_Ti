@@ -12,6 +12,7 @@ import { criarAlocacao, registrarDevolucao } from "@/server/modulos/alocacoes";
 import { adicionarCarregador, cadastrarEquipamento, type DadosEquipamento } from "@/server/modulos/inventario";
 import { concluirManutencao, enviarParaManutencao } from "@/server/modulos/manutencoes";
 import { cancelarTransferencia, confirmarTransferencia, transferirColaborador, transferirEmpresa } from "@/server/modulos/transferencias";
+import { MARCA, MODELO, PROCESSADOR } from "../apoio/catalogo";
 import { criarEmpresa, criarPessoa, limparBanco } from "../apoio/fabricas";
 
 async function ator(contaId: string): Promise<Ator> {
@@ -23,11 +24,11 @@ async function ator(contaId: string): Promise<Ator> {
 let serie = 0;
 const notebook = (empresaId: string, n = 5001): DadosEquipamento => ({
   categoria: "NOTEBOOK",
-  nomeDispositivo: `NBI${n}`,
+  processadorId: PROCESSADOR.i5, // código 5: o identificador é gerado (NBI5001, NBI5002...)
   patrimonio: `VLR-9${n}`,
   empresaId,
-  marca: "Dell",
-  modelo: "Latitude 5440",
+  marcaId: MARCA.Dell,
+  modeloId: MODELO.latitude5440,
   numeroSerie: `SIM-T${n}-${++serie}`,
 });
 
@@ -45,7 +46,7 @@ async function cenario() {
 async function entregue(supervisor: Ator, empresaId: string, colaboradorId: string, n = 5001) {
   const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresaId, n) });
   const c1 = await prisma.ativo.findFirstOrThrow({ where: { notebookId: nb.id } });
-  const alo = await criarAlocacao(supervisor, { colaboradorId, ativoIds: [nb.id, c1.id], modo: "ENTREGAR" });
+  const alo = await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId, ativoIds: [nb.id, c1.id], modo: "ENTREGAR" });
   return { nb, c1, alo };
 }
 
@@ -105,7 +106,7 @@ describe("transferência entre colaboradores", () => {
     // Histórico de ambos preservado: as movimentações da entrega à Ana continuam.
     expect(await prisma.movimentacaoAtivo.count({ where: { ativoId: nb.id, tipo: "ENTREGA", colaboradorId: ana.colaboradorId } })).toBe(1);
     // Carregadores: o mesmo C1, sem novo carregador nem renumeração.
-    expect((await prisma.ativo.findMany({ where: { notebookId: nb.id } })).map((c) => [c.nomeDispositivo, c.sequenciaCarregador])).toEqual([["NBI5001C1", 1]]);
+    expect((await prisma.ativo.findMany({ where: { notebookId: nb.id } })).map((c) => [c.nomeDispositivo, c.sequenciaCarregador])).toEqual([["NBI5001.C1", 1]]);
     expect(await prisma.eventoAuditoria.count({ where: { acao: "ativo.transferir_colaborador", resultado: "SUCESSO" } })).toBe(1);
   });
 
@@ -191,7 +192,7 @@ describe("transferência entre colaboradores", () => {
     await expect(transferirEmpresa(supervisor, { ativoId: nb.id, empresaDestinoId: empresa.id, motivo: "Volta", confirmacao: true, empresaAtualId: outra.id })).rejects.toThrow(/baixado/);
 
     const reservado = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5002) });
-    await criarAlocacao(supervisor, { colaboradorId: ana.colaboradorId, ativoIds: [reservado.id], modo: "RESERVAR" });
+    await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: ana.colaboradorId, ativoIds: [reservado.id], modo: "RESERVAR" });
     await expect(transferirColaborador(supervisor, { ...estoque, ativoId: reservado.id })).rejects.toThrow(/reservado/i);
 
     const { c1, alo } = await entregue(supervisor, empresa.id, ana.colaboradorId, 5003);
@@ -279,14 +280,14 @@ describe("transferência entre empresas", () => {
     });
     const mov = await prisma.movimentacaoAtivo.findFirstOrThrow({ where: { ativoId: nb.id, tipo: "TRANSFERENCIA_EMPRESA" } });
     expect(mov.observacao).toContain("Rateio de custos");
-    expect(mov.observacao).toContain("NBI5001C2 (VLR-9C2)"); // mantido, registrado
+    expect(mov.observacao).toContain("NBI5001.C2 (VLR-9C2)"); // mantido, registrado
     expect(await prisma.movimentacaoAtivo.count({ where: { ativoId: c1.id, tipo: "TRANSFERENCIA_EMPRESA" } })).toBe(1);
 
     // Escolhido explicitamente, o carregador com patrimônio também muda.
     await transferirEmpresa(supervisor, { ativoId: nb.id, empresaDestinoId: terceira.id, motivo: "Venda interna", confirmacao: true, empresaAtualId: outra.id, carregadoresComPatrimonio: [c2.id] });
     expect([(await ativo(nb.id)).empresaId, (await ativo(c1.id)).empresaId, (await ativo(c2.id)).empresaId]).toEqual([terceira.id, terceira.id, terceira.id]);
     // Vínculos e sequência intactos.
-    expect((await prisma.ativo.findMany({ where: { notebookId: nb.id }, orderBy: { sequenciaCarregador: "asc" } })).map((c) => c.nomeDispositivo)).toEqual(["NBI5001C1", "NBI5001C2"]);
+    expect((await prisma.ativo.findMany({ where: { notebookId: nb.id }, orderBy: { sequenciaCarregador: "asc" } })).map((c) => c.nomeDispositivo)).toEqual(["NBI5001.C1", "NBI5001.C2"]);
     expect(await prisma.transferencia.count({ where: { tipo: "EMPRESA" } })).toBe(2);
     expect(await prisma.eventoAuditoria.count({ where: { acao: "ativo.transferir_empresa", resultado: "SUCESSO" } })).toBe(2);
   });

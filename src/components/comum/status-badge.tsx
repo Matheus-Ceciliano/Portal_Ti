@@ -68,7 +68,7 @@ export const ESTADOS = {
   },
   alocacao: {
     RESERVADA: { tom: "atencao", icone: Clock, rotulo: "Reserva" },
-    ATIVA: { tom: "sucesso", icone: CheckCircle2, rotulo: "Entregue" },
+    ATIVA: { tom: "sucesso", icone: CheckCircle2, rotulo: "Alocada" },
     ENCERRADA: { tom: "neutro", icone: CircleDashed, rotulo: "Encerrada" },
     CANCELADA: { tom: "neutro", icone: XCircle, rotulo: "Cancelada" },
   },

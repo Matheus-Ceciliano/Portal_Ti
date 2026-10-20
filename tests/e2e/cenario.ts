@@ -9,6 +9,7 @@ import { gerarHashSenha } from "../../src/server/auth/senha";
 import { prisma } from "../../src/server/db";
 import { EMPRESAS, PESSOAS } from "../../src/server/dados-ficticios/cadastros";
 import { semearInventario } from "../../src/server/dados-ficticios/inventario";
+import { restaurarCatalogo } from "../apoio/catalogo";
 import { gerarCodigoAtivacao } from "../../src/server/modulos/ativacao";
 import { gerarTotp, segredoDaUri } from "../apoio/totp";
 
@@ -60,7 +61,8 @@ async function principal() {
   await prisma.$executeRawUnsafe(`
     TRUNCATE TABLE evento_auditoria, limite_tentativa, codigo_totp_usado, codigo_ativacao, fator_mfa,
       verificacao, credencial_conta, sessao, conta_acesso, permissao_individual, perfil_atribuido,
-      colaborador, empresa, instalacao, contador_documento CASCADE`);
+      colaborador, empresa, instalacao, contador_documento, kit_equipamento, historico_prefixo_categoria CASCADE`);
+  await restaurarCatalogo(prisma);
   await prisma.instalacao.create({ data: { id: 1, ambiente: "DESENVOLVIMENTO" } });
   await prisma.empresa.createMany({ data: EMPRESAS });
   for (const p of PESSOAS) {

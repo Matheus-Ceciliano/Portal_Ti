@@ -2,7 +2,7 @@
 
 import { Campo } from "@/components/comum/campos";
 import { SelecaoPersonalizada } from "@/components/comum/selecao-personalizada";
-import { Input } from "@/components/ui/input";
+import type { PadraoMemoriaOpcao, TipoPadraoMemoria } from "@/lib/catalogos";
 import { CAPACIDADES, FORMATOS, formatarCapacidade, INTERFACES, TECNOLOGIAS_RAM, type TipoArmazenamento, type TipoComponente } from "@/lib/componentes";
 
 /* Especificação de uma peça (RAM, SSD, HD) */
@@ -27,6 +27,18 @@ function opcoesCapacidade(tipo: TipoComponente, atual: string) {
 
 const opcoes = (lista: readonly string[]) => lista.map((v) => ({ valor: v, rotulo: v }));
 
+/**
+ * Opções de um padrão de memória do catálogo (aba Memórias): os ativos e o valor já gravado,
+ * mesmo inativo ou fora do catálogo. Sem catálogo, a lista padrão do portal.
+ */
+export function opcoesPadrao(memoria: PadraoMemoriaOpcao[] | undefined, tipo: TipoPadraoMemoria, atual: string, padrao: readonly string[] = []) {
+  const lista = memoria
+    ? memoria.filter((p) => p.tipo === tipo && (p.ativa || p.valor === atual)).map((p) => ({ valor: p.valor, rotulo: tipo === "FREQUENCIA" ? `${p.valor} MHz` : p.valor }))
+    : opcoes(padrao);
+  if (atual && !lista.some((o) => o.valor === atual)) lista.push({ valor: atual, rotulo: tipo === "FREQUENCIA" ? `${atual} MHz` : atual });
+  return lista;
+}
+
 /** Capacidade, tecnologia (RAM) ou interface (SSD/HD), formato e frequência (RAM). */
 export function CamposEspecificacao({
   tipo,
@@ -34,12 +46,15 @@ export function CamposEspecificacao({
   aoMudar,
   erro,
   classeCampo,
+  padroes,
 }: {
   tipo: TipoComponente;
   valor: EspecFormulario;
   aoMudar: (parcial: Partial<EspecFormulario>) => void;
   erro: (campo: string) => string | undefined;
   classeCampo?: string;
+  /** Padrões de memória do catálogo (tecnologia, formato e frequência). */
+  padroes?: PadraoMemoriaOpcao[];
 }) {
   const memoria = tipo === "MEMORIA_RAM";
   return (
@@ -59,7 +74,15 @@ export function CamposEspecificacao({
       </Campo>
       {memoria ? (
         <Campo rotulo="Tecnologia" erro={erro("tecnologia")} className={classeCampo}>
-          {(p) => <SelecaoPersonalizada id={p.id} valor={valor.tecnologia} aoMudar={(v) => aoMudar({ tecnologia: v })} opcoes={opcoes(TECNOLOGIAS_RAM)} vazio="Não informada" />}
+          {(p) => (
+            <SelecaoPersonalizada
+              id={p.id}
+              valor={valor.tecnologia}
+              aoMudar={(v) => aoMudar({ tecnologia: v })}
+              opcoes={opcoesPadrao(padroes, "TECNOLOGIA", valor.tecnologia, TECNOLOGIAS_RAM)}
+              vazio="Não informada"
+            />
+          )}
         </Campo>
       ) : (
         <Campo rotulo="Interface" erro={erro("interfaceConexao")} className={classeCampo}>
@@ -67,19 +90,27 @@ export function CamposEspecificacao({
         </Campo>
       )}
       <Campo rotulo="Formato" erro={erro("formato")} className={classeCampo}>
-        {(p) => <SelecaoPersonalizada id={p.id} valor={valor.formato} aoMudar={(v) => aoMudar({ formato: v })} opcoes={opcoes(FORMATOS[tipo])} vazio="Não informado" />}
+        {(p) => (
+          <SelecaoPersonalizada
+            id={p.id}
+            valor={valor.formato}
+            aoMudar={(v) => aoMudar({ formato: v })}
+            opcoes={memoria ? opcoesPadrao(padroes, "FORMATO", valor.formato, FORMATOS.MEMORIA_RAM) : opcoes(FORMATOS[tipo])}
+            vazio="Não informado"
+          />
+        )}
       </Campo>
       {memoria ? (
-        <Campo rotulo="Frequência (MHz)" erro={erro("frequenciaMhz")} className={classeCampo}>
+        <Campo rotulo="Frequência" erro={erro("frequenciaMhz")} className={classeCampo}>
           {(p) => (
-            <Input
-              {...p}
-              inputMode="numeric"
-              value={valor.frequenciaMhz}
-              onChange={(e) => aoMudar({ frequenciaMhz: e.target.value.replace(/\D/g, "").slice(0, 5) })}
-              placeholder="Ex.: 3200"
-              autoComplete="off"
-              className="tabular"
+            <SelecaoPersonalizada
+              id={p.id}
+              aria-describedby={p["aria-describedby"]}
+              invalido={p["aria-invalid"]}
+              valor={valor.frequenciaMhz}
+              aoMudar={(v) => aoMudar({ frequenciaMhz: v })}
+              opcoes={opcoesPadrao(padroes, "FREQUENCIA", valor.frequenciaMhz)}
+              vazio="Não informada"
             />
           )}
         </Campo>
@@ -150,11 +181,13 @@ export function CamposConfiguracao({
   aoMudar,
   erro,
   classeCampo,
+  padroes,
 }: {
   valor: ConfigFormulario;
   aoMudar: (parcial: Partial<ConfigFormulario>) => void;
   erro: (campo: string) => string | undefined;
   classeCampo?: string;
+  padroes?: PadraoMemoriaOpcao[];
 }) {
   const ssd = valor.armazenamento === "SSD" || valor.armazenamento === "AMBOS";
   const hd = valor.armazenamento === "HD" || valor.armazenamento === "AMBOS";
@@ -175,7 +208,15 @@ export function CamposConfiguracao({
         )}
       </Campo>
       <Campo rotulo="Tecnologia da memória" className={classeCampo}>
-        {(p) => <SelecaoPersonalizada id={p.id} valor={valor.ramTecnologia} aoMudar={(v) => aoMudar({ ramTecnologia: v })} opcoes={opcoes(TECNOLOGIAS_RAM)} vazio="Não informada" />}
+        {(p) => (
+          <SelecaoPersonalizada
+            id={p.id}
+            valor={valor.ramTecnologia}
+            aoMudar={(v) => aoMudar({ ramTecnologia: v })}
+            opcoes={opcoesPadrao(padroes, "TECNOLOGIA", valor.ramTecnologia, TECNOLOGIAS_RAM)}
+            vazio="Não informada"
+          />
+        )}
       </Campo>
       <Campo rotulo="Armazenamento" erro={erro("armazenamento")} className={classeCampo}>
         {(p) => (

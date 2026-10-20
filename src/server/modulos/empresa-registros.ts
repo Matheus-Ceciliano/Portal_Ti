@@ -5,6 +5,7 @@ import { ErroAutorizacao, ErroNegocio, executarCasoDeUso, exigirPermissao, podeC
 import type { EstadoTermo } from "@/generated/prisma/client";
 import { CATEGORIAS_EQUIPAMENTO, FORA_DE_EQUIPAMENTOS, ROTULO_CATEGORIA, type Categoria, type Situacao } from "@/lib/inventario";
 import { prisma } from "@/server/db";
+import { rotuloTipo, SELECAO_TIPO } from "./inventario-base";
 
 /**
  * Registros de UMA empresa (colaboradores, equipamentos, alocações e resumo), todos do banco.
@@ -208,13 +209,14 @@ export async function listarEquipamentosEmpresa(
       select: {
         id: true,
         categoria: true,
+        ...SELECAO_TIPO,
         nomeDispositivo: true,
         patrimonio: true,
         marca: true,
         modelo: true,
         numeroSerie: true,
         situacao: true,
-        fotos: { where: { contexto: "CADASTRO" }, orderBy: [{ tipo: "asc" }], take: 1, select: { id: true } },
+        fotos: { where: { contexto: "CADASTRO", removidaEm: null }, orderBy: [{ tipo: "asc" }], take: 1, select: { id: true } },
         itensAlocacao: { where: { aberto: true, alocacao: { estado: "ATIVA" } }, take: 1, select: { alocacao: { select: { colaborador: { select: { id: true, nome: true } } } } } },
       },
     });
@@ -224,7 +226,7 @@ export async function listarEquipamentosEmpresa(
         return {
           id: a.id,
           categoria: a.categoria,
-          tipo: ROTULO_CATEGORIA[a.categoria],
+          tipo: rotuloTipo(a),
           nome: a.nomeDispositivo,
           patrimonio: a.patrimonio,
           marca: a.marca,
@@ -293,7 +295,7 @@ const SELECAO_ITEM = {
   id: true,
   aberto: true,
   empresaProprietaria: { select: { id: true, sigla: true, nome: true } },
-  ativo: { select: { id: true, categoria: true, nomeDispositivo: true, patrimonio: true, marca: true, modelo: true } },
+  ativo: { select: { id: true, categoria: true, ...SELECAO_TIPO, nomeDispositivo: true, patrimonio: true, marca: true, modelo: true } },
   alocacao: {
     select: {
       id: true,
@@ -320,7 +322,7 @@ function paraAlocacaoEmpresa(i: ItemSelecionado): AlocacaoEmpresa {
     numero: a.numero,
     ativoId: i.ativo.id,
     equipamento: `${i.ativo.marca} ${i.ativo.modelo}`,
-    tipo: ROTULO_CATEGORIA[i.ativo.categoria],
+    tipo: rotuloTipo(i.ativo),
     patrimonio: i.ativo.patrimonio ?? i.ativo.nomeDispositivo ?? "—",
     responsavelId: a.colaborador.id,
     responsavel: a.colaborador.nome,

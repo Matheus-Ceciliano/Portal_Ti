@@ -12,10 +12,10 @@ import {
 } from "@/lib/inventario";
 
 describe("carregadores", () => {
-  it("nome do notebook + C + sequência (NBI5001 → NBI5001C1, C2, C3)", () => {
-    expect(nomeCarregador("NBI5001", 1)).toBe("NBI5001C1");
-    expect(nomeCarregador("nbi5001", 2)).toBe("NBI5001C2");
-    expect(nomeCarregador(" NBI5001 ", 3)).toBe("NBI5001C3");
+  it("nome do notebook + .C + sequência (NBI5001 → NBI5001.C1, .C2, .C3)", () => {
+    expect(nomeCarregador("NBI5001", 1)).toBe("NBI5001.C1");
+    expect(nomeCarregador("nbi5001", 2)).toBe("NBI5001.C2");
+    expect(nomeCarregador(" NBI5001 ", 3)).toBe("NBI5001.C3");
     expect(() => nomeCarregador("NBI5001", 0)).toThrow();
     expect(() => nomeCarregador("NBI5001", 1.5)).toThrow();
   });

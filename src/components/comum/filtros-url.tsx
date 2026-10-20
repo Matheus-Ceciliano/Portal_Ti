@@ -61,7 +61,7 @@ export function FiltrosUrl({
       placeholder={placeholder}
       rotuloBusca={rotuloBusca}
       filtros={filtros}
-      aoFiltrar={(chave, valor) => aplicar({ [chave]: valor })}
+      aoFiltrar={(chave, valor) => aplicar({ [chave]: valor, ...Object.fromEntries((filtros.find((f) => f.chave === chave)?.limpa ?? []).map((k) => [k, ""])) })}
       aoLimpar={() => {
         setBusca("");
         aplicar(Object.fromEntries([...chavesFiltro, "busca"].map((k) => [k, ""])));

@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
+import { PARTES_KIT } from "@/lib/identificacao";
 import { TIPOS_FOTO } from "@/lib/inventario";
 import { obterSessao } from "@/server/auth/sessao";
 import { mensagemDeErro } from "@/server/authz/exigir";
@@ -40,11 +41,11 @@ function atualizarTelas(ativoId?: string) {
   if (ativoId) revalidatePath(`/ti/inventario/${ativoId}`);
 }
 
-/** Fotos enviadas no formulário: campos "foto_<TIPO>" (o nome do arquivo é descartado). */
-async function fotosDoFormulario(formData: FormData, tipoFixo?: string): Promise<FotoEnviada[]> {
+/** Fotos enviadas no formulário: campos "foto_<TIPO>" (o nome do arquivo é descartado). Kit: "<PARTE>_foto_<TIPO>". */
+async function fotosDoFormulario(formData: FormData, tipoFixo?: string, prefixo = ""): Promise<FotoEnviada[]> {
   const fotos: FotoEnviada[] = [];
   for (const tipo of tipoFixo ? [tipoFixo] : TIPOS_FOTO) {
-    for (const arquivo of formData.getAll(`foto_${tipo}`)) {
+    for (const arquivo of formData.getAll(`${prefixo}foto_${tipo}`)) {
       if (arquivo instanceof File && arquivo.size > 0) fotos.push({ tipo, dados: Buffer.from(await arquivo.arrayBuffer()) });
     }
   }
@@ -76,17 +77,21 @@ function campoDoErro(mensagem: string): string | null {
     [/^Formato/i, "formato"],
     [/^Frequência/i, "frequenciaMhz"],
     [/tipo do componente/i, "categoria"],
+    [/processador/i, "processadorId"],
+    [/^O modelo |modelo\.$/i, "modeloId"],
+    [/^A marca |marca\.$/i, "marcaId"],
+    [/^O sistema |sistema operacional/i, "sistemaOperacionalId"],
+    [/peça do kit|peças do kit|número de série do|repetido entre as peças/i, "partesKit"],
+    [/patrimônio ou o nome/i, "patrimonio"],
     [/categoria/i, "categoria"],
     [/nome (do|de) dispositivo/i, "nomeDispositivo"],
     [/patrimônio/i, "patrimonio"],
     [/série/i, "numeroSerie"],
     [/empresa/i, "empresaId"],
-    [/marca/i, "marca"],
-    [/modelo/i, "modelo"],
-    [/processador/i, "processador"],
+    [/marca/i, "marcaId"],
+    [/modelo/i, "modeloId"],
     [/memória/i, "memoriaRam"],
     [/armazenamento/i, "armazenamento"],
-    [/sistema operacional/i, "sistemaOperacional"],
     [/aquisição/i, "dataAquisicao"],
     [/garantia/i, "garantiaAte"],
     [/observaç/i, "observacoes"],
@@ -100,18 +105,22 @@ export async function acaoSalvarEquipamento(_a: EstadoInventario, formData: Form
   const ator = await atorAtual();
   if (!ator) return { erro: SESSAO };
   const id = texto(formData, "id");
+  const partes = PARTES_KIT.filter((p) => formData.get(`parte_${p}`) === "sim");
   const dados = {
+    categoriaId: texto(formData, "categoriaId"),
     categoria: texto(formData, "categoria"),
+    partesKit: partes.map((parte) => ({ parte, numeroSerie: texto(formData, `serie_${parte}`) })),
     nomeDispositivo: texto(formData, "nomeDispositivo"),
     patrimonio: texto(formData, "patrimonio"),
     empresaId: texto(formData, "empresaId"),
-    marca: texto(formData, "marca"),
-    modelo: texto(formData, "modelo"),
+    // Catálogos do Inventário (ids); o servidor confere marca, modelo, processador e sistema.
+    marcaId: texto(formData, "marcaId") || null,
+    modeloId: texto(formData, "modeloId") || null,
+    processadorId: texto(formData, "processadorId") || null,
+    sistemaOperacionalId: texto(formData, "sistemaOperacionalId") || null,
     numeroSerie: texto(formData, "numeroSerie"),
-    processador: texto(formData, "processador"),
     memoriaRam: texto(formData, "memoriaRam"),
     armazenamento: texto(formData, "armazenamento"),
-    sistemaOperacional: texto(formData, "sistemaOperacional"),
     dataAquisicao: texto(formData, "dataAquisicao"),
     garantiaAte: texto(formData, "garantiaAte"),
     observacoes: texto(formData, "observacoes"),
@@ -127,22 +136,21 @@ export async function acaoSalvarEquipamento(_a: EstadoInventario, formData: Form
   try {
     const fotos = await fotosDoFormulario(formData);
     if (id) {
-      await editarEquipamento(ator, { id, dados, fotos });
+      const removerFotos = formData.getAll("removerFoto").filter((v): v is string => typeof v === "string").slice(0, 100);
+      await editarEquipamento(ator, { id, dados, fotos, removerFotos });
       atualizarTelas(id);
       return { ok: true, id, mensagem: "Cadastro do equipamento atualizado." };
     }
-    const r = await cadastrarEquipamento(ator, { dados, fotos, chaveRequisicao: texto(formData, "chaveRequisicao") });
+    const fotosPartes = Object.fromEntries(await Promise.all(partes.map(async (p) => [p, await fotosDoFormulario(formData, undefined, `${p}_`)] as const)));
+    const r = await cadastrarEquipamento(ator, { dados, fotos, fotosPartes, chaveRequisicao: texto(formData, "chaveRequisicao") });
     atualizarTelas(r.id);
-    return {
-      ok: true,
-      id: r.id,
-      mensagem:
-        dados.categoria === "NOTEBOOK"
-          ? "Equipamento cadastrado com o carregador principal."
-          : ["MEMORIA_RAM", "SSD", "HD"].includes(dados.categoria)
-            ? "Componente cadastrado no estoque."
-            : "Equipamento cadastrado.",
-    };
+    // O identificador definitivo vem do banco (a prévia do formulário não reserva número).
+    const mensagem = r.pecas.length
+      ? `Kit ${r.nome} cadastrado: ${r.pecas.join(", ")}.`
+      : r.nome
+        ? `${r.nome} cadastrado${r.carregador ? ` com o carregador ${r.carregador}` : ""}.`
+        : "Equipamento cadastrado.";
+    return { ok: true, id: r.id, mensagem };
   } catch (erro) {
     const mensagem = mensagemDeErro(erro);
     const campo = campoDoErro(mensagem);

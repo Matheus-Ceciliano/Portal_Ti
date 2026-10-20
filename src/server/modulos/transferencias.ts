@@ -11,7 +11,7 @@ import {
   encerrarItem,
   lerData,
   lerMomento,
-  proximoNumero,
+  proximoNumeroAlocacao,
   registrarMovimentacao,
   rotuloAtivo,
   traduzirConflito,
@@ -116,10 +116,14 @@ async function efetivar(tx: Transacao, ator: Ator, a: EquipamentoTravado, destin
   const levados = [{ itemId: item.id, ativo: a as { id: string; empresaId: string } }, ...carregadores.map((c) => ({ itemId: c.id, ativo: c.ativo }))];
   for (const l of levados) await encerrarItem(tx, ator, l.itemId, "TRANSFERENCIA", quando);
   await encerrarAlocacaoSemItens(tx, origem.id);
-  const numero = await proximoNumero(tx, "ALO", quando);
+  const numero = await proximoNumeroAlocacao(tx);
   const nova = await tx.alocacao.create({
     data: {
       numero,
+      // Quem executa a transferência (TI autorizada) responde pela nova alocação.
+      responsavelTiContaId: ator.contaId,
+      responsavelTiNome: ator.nome,
+      criadaPorContaId: ator.contaId,
       colaboradorId: destino.id,
       empresaColaboradorId: destino.empresaId,
       estado: "ATIVA",
@@ -217,6 +221,8 @@ export async function transferirColaborador(ator: Ator, e: EntradaTransferenciaC
         colaboradorId: colaborador.id,
         ativoIds: [a.id, ...a.carregadores.map((c) => c.id)],
         modo: e.modo,
+        // Quem executa a transferência responde pela nova alocação.
+        responsavelTiContaId: ator.contaId,
         data: e.data,
         observacoes,
         chaveRequisicao: chave ?? undefined,

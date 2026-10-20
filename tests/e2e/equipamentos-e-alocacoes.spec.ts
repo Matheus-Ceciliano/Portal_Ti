@@ -34,7 +34,7 @@ test.describe("Ficha do equipamento a partir da empresa (Supervisor TI)", () => 
     // Custódia e TER ficam em Alocações; a ficha mostra só a referência.
     await expect(page.getByRole("region", { name: "Alocação" })).toContainText("ALO-2026-0006");
     await expect(page.getByRole("region", { name: "Alocação" }).getByRole("link", { name: "Ver em Alocações" })).toBeVisible();
-    await expect(page.getByRole("region", { name: "Carregadores" })).toContainText("NBI4590C1");
+    await expect(page.getByRole("region", { name: "Carregadores" })).toContainText("NBI4590.C1");
 
     await page.getByRole("link", { name: `Voltar para ${NOME_HZE}` }).click();
     await expect(page).toHaveURL(origem);
@@ -71,7 +71,7 @@ test.describe("Alocações da empresa (Supervisor TI)", () => {
     await modal.getByRole("tab", { name: /Equipamentos/ }).click();
     const itens = modal.getByTestId("itens-alocacao");
     await expect(itens.getByRole("listitem")).toHaveCount(4); // notebook, carregador, monitor e kit
-    await expect(itens).toContainText("NBI4512C1");
+    await expect(itens).toContainText("NBI4512.C1");
     await modal.getByRole("tab", { name: "Documentos" }).click();
     await expect(modal.getByText("TER-2026-0088")).toBeVisible();
     await page.keyboard.press("Escape");

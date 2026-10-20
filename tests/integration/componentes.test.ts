@@ -9,10 +9,11 @@ import { carregarAtor, type Ator } from "@/server/authz/ator";
 import { ErroAutorizacao } from "@/server/authz/exigir";
 import { prisma } from "@/server/db";
 import { criarAlocacao } from "@/server/modulos/alocacoes";
-import { definirConfiguracaoOriginal, instalarComponente, removerComponente, substituirComponente } from "@/server/modulos/componentes";
-import { cadastrarEquipamento, editarEquipamento, obterEquipamento, type DadosEquipamento } from "@/server/modulos/inventario";
+import { instalarComponente, removerComponente, substituirComponente } from "@/server/modulos/componentes";
+import { cadastrarEquipamento, editarEquipamento, listarInventario, obterEquipamento, type DadosEquipamento } from "@/server/modulos/inventario";
 import { enviarParaManutencao } from "@/server/modulos/manutencoes";
 import { transferirColaborador } from "@/server/modulos/transferencias";
+import { MARCA, MODELO, PROCESSADOR } from "../apoio/catalogo";
 import { criarEmpresa, criarPessoa, limparBanco } from "../apoio/fabricas";
 
 async function ator(contaId: string): Promise<Ator> {
@@ -25,13 +26,12 @@ let serie = 0;
 const CONFIG = { memoria: { capacidadeGb: 16, tecnologia: "DDR4" }, armazenamento: [{ tipo: "SSD", capacidadeGb: 512, interfaceConexao: "NVMe/PCIe" }] };
 const notebook = (empresaId: string, n = 5001, configuracao: unknown = CONFIG): DadosEquipamento => ({
   categoria: "NOTEBOOK",
-  nomeDispositivo: `NBI${n}`,
+  processadorId: PROCESSADOR.i5, // código 5: o identificador é gerado (NBI5001, NBI5002...)
   patrimonio: `VLR-9${n}`,
   empresaId,
-  marca: "Dell",
-  modelo: "Latitude 5440",
+  marcaId: MARCA.Dell,
+  modeloId: MODELO.latitude5440,
   numeroSerie: `SIM-N${n}-${++serie}`,
-  processador: "Intel Core i5",
   configuracao,
 });
 const peca = (empresaId: string, categoria: "MEMORIA_RAM" | "SSD" | "HD", capacidadeGb: number, extra: Partial<DadosEquipamento> = {}): DadosEquipamento => ({
@@ -41,8 +41,8 @@ const peca = (empresaId: string, categoria: "MEMORIA_RAM" | "SSD" | "HD", capaci
   tecnologia: categoria === "MEMORIA_RAM" ? "DDR4" : null,
   interfaceConexao: categoria === "SSD" ? "NVMe/PCIe" : categoria === "HD" ? "SATA" : null,
   formato: categoria === "MEMORIA_RAM" ? "SO-DIMM" : categoria === "SSD" ? "M.2 2280" : '2,5"',
-  marca: "Kingston",
-  modelo: "Fury",
+  marcaId: MARCA.Kingston,
+  modeloId: categoria === "MEMORIA_RAM" ? MODELO.furyRam : categoria === "SSD" ? MODELO.furySsd : MODELO.furyHd,
   ...extra,
 });
 
@@ -71,7 +71,7 @@ describe("cadastro simples do notebook", () => {
       ["MEMORIA_RAM", 16, true, null],
       ["SSD", 512, true, null],
     ]);
-    expect(await prisma.ativo.findFirstOrThrow({ where: { notebookId: nb.id } })).toMatchObject({ nomeDispositivo: "NBI5001C1", categoria: "CARREGADOR" });
+    expect(await prisma.ativo.findFirstOrThrow({ where: { notebookId: nb.id } })).toMatchObject({ nomeDispositivo: "NBI5001.C1", categoria: "CARREGADOR" });
     expect(await prisma.intervencaoConfiguracao.count({ where: { equipamentoId: nb.id, tipo: "CONFIGURACAO_ORIGINAL" } })).toBe(1);
 
     // Sem configuração: nada é inventado.
@@ -167,10 +167,10 @@ describe("instalação, substituição e remoção", () => {
     const r = await substituirComponente(supervisor, {
       notebookId: nb.id,
       pecaId: ssd.id,
-      novoComponente: { categoria: "SSD", capacidadeGb: 1000, interfaceConexao: "NVMe/PCIe", formato: "M.2 2280", marca: "Samsung", modelo: "990 Pro" },
+      novoComponente: { categoria: "SSD", capacidadeGb: 1000, interfaceConexao: "NVMe/PCIe", formato: "M.2 2280", marcaId: MARCA.Samsung, modeloId: MODELO.samsung990 },
       motivo: "Upgrade de armazenamento",
       destino: "DISPONIVEL",
-      registrarRemovida: { marca: "SK Hynix", modelo: "PC801", formato: "M.2 2280" },
+      registrarRemovida: { marcaId: MARCA["SK Hynix"], modeloId: MODELO.hynixPc801, formato: "M.2 2280" },
     });
     expect(r).toMatchObject({ instalado: "SSD001", registrado: "SSD002", resultante: "RAM 16 GB DDR4 · SSD NVMe/PCIe 1 TB" });
     expect((await ficha(nb.id)).armazenamento).toBe("SSD NVMe/PCIe 1 TB");
@@ -180,7 +180,7 @@ describe("instalação, substituição e remoção", () => {
     // HD no lugar de SSD é permitido; memória no lugar de armazenamento, não.
     const linha = (await vigentes(nb.id)).find((p) => p.tipo === "SSD")!;
     await expect(
-      substituirComponente(supervisor, { notebookId: nb.id, pecaId: linha.id, novoComponente: { categoria: "MEMORIA_RAM", capacidadeGb: 8, marca: "x", modelo: "y" }, motivo: "z", destino: "DISPONIVEL" }),
+      substituirComponente(supervisor, { notebookId: nb.id, pecaId: linha.id, novoComponente: { categoria: "MEMORIA_RAM", capacidadeGb: 8, marcaId: MARCA.Kingston, modeloId: MODELO.furyRam }, motivo: "z", destino: "DISPONIVEL" }),
     ).rejects.toThrow(/memória por memória/);
   });
 
@@ -222,10 +222,10 @@ describe("pessoas e notebook alocado", () => {
   it("RAM, SSD e HD nunca são alocados a pessoas (servidor e banco)", async () => {
     const { empresa, supervisor, pessoa } = await cenario();
     const ram = await cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 8) });
-    await expect(criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [ram.id], modo: "ENTREGAR" })).rejects.toThrow(/não são alocados a pessoas/);
+    await expect(criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [ram.id], modo: "ENTREGAR" })).rejects.toThrow(/não são alocados a pessoas/);
     await expect(transferirColaborador(supervisor, { ativoId: ram.id, colaboradorId: pessoa.colaboradorId, modo: "ENTREGAR", alocacaoAtualId: null })).rejects.toThrow(/não são alocados a pessoas/);
     const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5201) });
-    const alo = await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id], modo: "ENTREGAR" });
+    const alo = await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id], modo: "ENTREGAR" });
     await expect(prisma.itemAlocacao.create({ data: { alocacaoId: alo.id, ativoId: ram.id, empresaProprietariaId: empresa.id } })).rejects.toThrow(/não são alocados a pessoas/);
     await expect(enviarParaManutencao(supervisor, { ativoId: ram.id, motivo: "x", observacoes: "y" })).resolves.toBeTruthy(); // em estoque pode ir para manutenção
   });
@@ -233,7 +233,7 @@ describe("pessoas e notebook alocado", () => {
   it("intervenção em notebook alocado exige confirmação e não encerra a alocação", async () => {
     const { empresa, supervisor, pessoa } = await cenario();
     const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
-    const alo = await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id], modo: "ENTREGAR" });
+    const alo = await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id], modo: "ENTREGAR" });
     const ram = await cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 16) });
     await expect(instalarComponente(supervisor, { notebookId: nb.id, componenteId: ram.id })).rejects.toThrow(/Confirme que ele está disponível/);
     await instalarComponente(supervisor, { notebookId: nb.id, componenteId: ram.id, confirmacaoIntervencao: true, motivo: "Upgrade" });
@@ -246,41 +246,75 @@ describe("pessoas e notebook alocado", () => {
     // Peça instalada não vai direto para manutenção nem muda de especificação.
     await expect(enviarParaManutencao(supervisor, { ativoId: ram.id, motivo: "x", observacoes: "y" })).rejects.toThrow(/instalado em um notebook/);
     await expect(editarEquipamento(supervisor, { id: ram.id, dados: peca(empresa.id, "MEMORIA_RAM", 32) })).rejects.toThrow(/remova-o do notebook/);
-    await editarEquipamento(supervisor, { id: ram.id, dados: peca(empresa.id, "MEMORIA_RAM", 16, { modelo: "Fury Beast" }) });
+    await editarEquipamento(supervisor, { id: ram.id, dados: peca(empresa.id, "MEMORIA_RAM", 16, { modeloId: MODELO.furyBeast }) });
     expect((await ficha(ram.id)).modelo).toBe("Fury Beast");
   });
 });
 
 describe("dados existentes e configuração original", () => {
-  it("notebook antigo (só texto) não perde a ficha: exige a configuração original antes da primeira intervenção", async () => {
+  it("notebook antigo (só a ficha escrita): vincular soma à memória da ficha, sem criar peça a partir do texto", async () => {
     const { empresa, supervisor } = await cenario();
     const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5301, null) });
     await prisma.ativo.update({ where: { id: nb.id }, data: { memoriaRam: "8 GB", armazenamento: "SSD 256 GB" } }); // como os cadastros antigos
     const ram = await cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 8) });
-    await expect(instalarComponente(supervisor, { notebookId: nb.id, componenteId: ram.id })).rejects.toThrow(/configuração original/);
     // Edição sem a configuração não apaga o texto.
-    await editarEquipamento(supervisor, { id: nb.id, dados: { ...notebook(empresa.id, 5301, null), modelo: "Latitude 3540" } });
+    await editarEquipamento(supervisor, { id: nb.id, dados: { ...notebook(empresa.id, 5301, null), modeloId: MODELO.latitude3540 } });
     expect(await ficha(nb.id)).toMatchObject({ memoriaRam: "8 GB", armazenamento: "SSD 256 GB", modelo: "Latitude 3540" });
-    expect(await componentesFisicos()).toBe(1); // nenhuma peça criada a partir do texto
 
-    await definirConfiguracaoOriginal(supervisor, { notebookId: nb.id, configuracao: { memoria: { capacidadeGb: 8, tecnologia: "DDR4" }, armazenamento: [{ tipo: "SSD", capacidadeGb: 256, interfaceConexao: "SATA" }] } });
-    const original = await prisma.intervencaoConfiguracao.findFirstOrThrow({ where: { equipamentoId: nb.id } });
-    expect(original).toMatchObject({ configuracaoAnterior: "RAM 8 GB · SSD 256 GB", configuracaoResultante: "RAM 8 GB DDR4 · SSD SATA 256 GB" });
-    // Correção antes de intervenções: permitida, com histórico.
-    await definirConfiguracaoOriginal(supervisor, { notebookId: nb.id, configuracao: { memoria: { capacidadeGb: 16, tecnologia: "DDR4" }, armazenamento: [{ tipo: "SSD", capacidadeGb: 256, interfaceConexao: "SATA" }] } });
-    expect((await ficha(nb.id)).memoriaRam).toBe("16 GB DDR4");
-    expect(await prisma.pecaConfiguracao.count({ where: { equipamentoId: nb.id } })).toBe(4); // 2 encerradas + 2 vigentes
+    // A ficha antiga conta como configuração original: 8 GB + RAM001 (8 GB) = 16 GB.
     await instalarComponente(supervisor, { notebookId: nb.id, componenteId: ram.id });
-    expect((await ficha(nb.id)).memoriaRam).toBe("24 GB DDR4");
-    // Depois de uma intervenção, a original não é mais reescrita.
-    await expect(definirConfiguracaoOriginal(supervisor, { notebookId: nb.id, configuracao: CONFIG })).rejects.toThrow(/intervenções/);
+    expect(await ficha(nb.id)).toMatchObject({ memoriaRam: "16 GB DDR4", armazenamento: "SSD 256 GB" });
+    expect(await componentesFisicos()).toBe(1); // só a RAM001: nada criado a partir do texto
+    const historico = await prisma.intervencaoConfiguracao.findMany({ where: { equipamentoId: nb.id }, orderBy: { criadaEm: "asc" } });
+    expect(historico.map((h) => [h.tipo, h.configuracaoAnterior, h.configuracaoResultante])).toEqual([
+      ["CONFIGURACAO_ORIGINAL", "RAM 8 GB · SSD 256 GB", "RAM 8 GB · SSD 256 GB"],
+      ["INSTALACAO", "RAM 8 GB · SSD 256 GB", "RAM 16 GB DDR4 · SSD 256 GB"],
+    ]);
     const f = await obterEquipamento(supervisor, nb.id);
-    expect(f.componentesInternos).toMatchObject({ estruturada: true, podeAjustarOriginal: false });
+    expect(f.componentesInternos).toMatchObject({ estruturada: true, podeAjustarOriginal: false, resumo: { memoria: "16 GB DDR4" } });
     expect(f.componentesInternos!.pecas.map((p) => [p.descricao, p.original, p.componente?.nome ?? null])).toEqual([
-      ["16 GB DDR4", true, null],
+      ["8 GB", true, null],
       ["8 GB DDR4", false, "RAM001"],
-      ["SSD SATA 256 GB", true, null],
+      ["SSD 256 GB", true, null],
     ]); // agrupadas por tipo
+  });
+
+  it("a configuração original se corrige pela edição até a primeira intervenção; depois, só pelos componentes", async () => {
+    const { empresa, supervisor } = await cenario();
+    const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
+    const ajuste = { memoria: { capacidadeGb: 32, tecnologia: "DDR5" }, armazenamento: [{ tipo: "SSD", capacidadeGb: 1000, interfaceConexao: "NVMe/PCIe" }] };
+    await editarEquipamento(supervisor, { id: nb.id, dados: notebook(empresa.id, 5001, ajuste) });
+    expect(await ficha(nb.id)).toMatchObject({ memoriaRam: "32 GB DDR5", armazenamento: "SSD NVMe/PCIe 1 TB" });
+    expect(await prisma.pecaConfiguracao.count({ where: { equipamentoId: nb.id } })).toBe(4); // 2 encerradas + 2 vigentes
+    const ram = await cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 8) });
+    await instalarComponente(supervisor, { notebookId: nb.id, componenteId: ram.id });
+    await expect(editarEquipamento(supervisor, { id: nb.id, dados: notebook(empresa.id, 5001, CONFIG) })).rejects.toThrow(/intervenções/);
+  });
+});
+
+describe("lista do inventário", () => {
+  it("equipamentos e componentes em listas e números separados; filtros por capacidade e notebook", async () => {
+    const { empresa, supervisor } = await cenario();
+    const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
+    const ram = await cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "MEMORIA_RAM", 16) });
+    await cadastrarEquipamento(supervisor, { dados: peca(empresa.id, "SSD", 512) });
+    await instalarComponente(supervisor, { notebookId: nb.id, componenteId: ram.id });
+
+    const equipamentos = await listarInventario(supervisor);
+    expect(equipamentos.linhas.map((l) => l.nome)).toEqual(["NBI5001", "NBI5001.C1"]); // peças internas ficam no outro grupo
+    expect(equipamentos.indicadores.total).toBe(2); // notebook e carregador
+
+    const componentes = await listarInventario(supervisor, { grupo: "componentes" });
+    expect(componentes.linhas.map((l) => [l.nome, l.especificacao, l.situacao, l.instaladoEm?.nome ?? null])).toEqual([
+      ["RAM001", "16 GB DDR4", "INSTALADO", "NBI5001"],
+      ["SSD001", "SSD NVMe/PCIe 512 GB", "DISPONIVEL", null],
+    ]);
+    expect(componentes.indicadores).toMatchObject({ total: 2, instalados: 1, disponiveis: 1, alocados: 0 });
+    expect(componentes.capacidades).toEqual([16, 512]);
+    expect(componentes.notebooks).toEqual([{ id: nb.id, nome: "NBI5001" }]);
+    expect((await listarInventario(supervisor, { grupo: "componentes", capacidadeGb: 512 })).linhas.map((l) => l.nome)).toEqual(["SSD001"]);
+    expect((await listarInventario(supervisor, { grupo: "componentes", notebookId: nb.id })).linhas.map((l) => l.nome)).toEqual(["RAM001"]);
+    expect((await listarInventario(supervisor, { grupo: "componentes", busca: "ram001" })).total).toBe(1);
   });
 });
 
@@ -292,7 +326,7 @@ describe("permissões", () => {
     const comum = await ator(pessoa.contaId);
     await expect(cadastrarEquipamento(comum, { dados: peca(empresa.id, "SSD", 256) })).rejects.toBeInstanceOf(ErroAutorizacao);
     await expect(instalarComponente(comum, { notebookId: nb.id, componenteId: ram.id })).rejects.toBeInstanceOf(ErroAutorizacao);
-    await expect(definirConfiguracaoOriginal(comum, { notebookId: nb.id, configuracao: CONFIG })).rejects.toBeInstanceOf(ErroAutorizacao);
+    await expect(editarEquipamento(comum, { id: nb.id, dados: notebook(empresa.id, 5001, CONFIG) })).rejects.toBeInstanceOf(ErroAutorizacao);
     expect(await prisma.eventoAuditoria.count({ where: { resultado: "NEGADO", atorContaId: pessoa.contaId } })).toBeGreaterThanOrEqual(3);
     const estagiario = await ator((await criarPessoa({ perfis: ["ESTAGIARIO_TI"], ativada: true })).contaId);
     await instalarComponente(estagiario, { notebookId: nb.id, componenteId: ram.id });

@@ -18,6 +18,8 @@ export type IconeNavegacao =
 
 export type ItemNavegacao = { href: string; rotulo: string; icone: IconeNavegacao; contador?: number; contadorRotulo?: string };
 export type GrupoNavegacao = { rotulo?: string; itens: ItemNavegacao[] };
+/** Menu principal sempre visível; o restante fica no painel "Mais opções". */
+export type NavegacaoTi = { principal: GrupoNavegacao[]; maisOpcoes: GrupoNavegacao[] };
 
 type Definicao = ItemNavegacao & { permissao: Permissao; escopoGrupo?: boolean };
 
@@ -25,7 +27,7 @@ type Definicao = ItemNavegacao & { permissao: Permissao; escopoGrupo?: boolean }
  * Itens visíveis calculados no servidor a partir das permissões efetivas. Esconder um
  * item é só experiência: cada página e cada ação verifica a permissão de novo.
  */
-export function navegacaoTi(ator: Ator, contadores: { chamadosSemResponsavel: number }): GrupoNavegacao[] {
+export function navegacaoTi(ator: Ator, contadores: { chamadosSemResponsavel: number }): NavegacaoTi {
   const filtrar = (itens: Definicao[]) =>
     itens
       .filter((i) => (i.escopoGrupo ? podeComEscopoGrupo(ator, i.permissao) : pode(ator, i.permissao)))
@@ -36,13 +38,10 @@ export function navegacaoTi(ator: Ator, contadores: { chamadosSemResponsavel: nu
         contador: i.contador,
         contadorRotulo: i.contadorRotulo,
       }));
+  const comItens = (grupos: GrupoNavegacao[]) => grupos.filter((g) => g.itens.length > 0);
 
-  const painel: Definicao = { href: "/ti", rotulo: "Dashboard", icone: "painel", permissao: "dashboard.ver" };
-  const auditoria: Definicao = { href: "/ti/auditoria", rotulo: "Auditoria", icone: "auditoria", permissao: "auditoria.ver" };
-  const gerencial = ator.visao === "GERENCIAL";
-
-  const grupos: GrupoNavegacao[] = [
-    { itens: filtrar(gerencial ? [painel, auditoria] : [painel]) },
+  const principal: GrupoNavegacao[] = [
+    { itens: filtrar([{ href: "/ti", rotulo: "Dashboard", icone: "painel", permissao: "dashboard.ver" }]) },
     {
       rotulo: "Cadastros",
       itens: filtrar([
@@ -55,13 +54,7 @@ export function navegacaoTi(ator: Ator, contadores: { chamadosSemResponsavel: nu
       itens: filtrar([
         { href: "/ti/inventario", rotulo: "Inventário", icone: "inventario", permissao: "ativo.ver", escopoGrupo: true },
         { href: "/ti/alocacoes", rotulo: "Alocações", icone: "alocacoes", permissao: "ativo.ver", escopoGrupo: true },
-      ]),
-    },
-    {
-      rotulo: "Documentos",
-      itens: filtrar([
         { href: "/ti/documentos/ter", rotulo: "TER", icone: "ter", permissao: "termo.ver", escopoGrupo: true },
-        { href: "/ti/documentos/tdv", rotulo: "TDV", icone: "tdv", permissao: "termo.ver", escopoGrupo: true },
       ]),
     },
     {
@@ -77,14 +70,21 @@ export function navegacaoTi(ator: Ator, contadores: { chamadosSemResponsavel: nu
         { href: "/ti/tutoriais", rotulo: "Tutoriais", icone: "tutoriais", permissao: "tutorial.gerenciar" },
       ]),
     },
+  ];
+
+  const maisOpcoes: GrupoNavegacao[] = [
+    {
+      rotulo: "Documentos",
+      itens: filtrar([{ href: "/ti/documentos/tdv", rotulo: "TDV", icone: "tdv", permissao: "termo.ver", escopoGrupo: true }]),
+    },
     {
       rotulo: "Administração",
       itens: filtrar([
         { href: "/ti/integracoes", rotulo: "Integrações", icone: "integracoes", permissao: "integracao.ver" },
-        ...(gerencial ? [] : [auditoria]),
+        { href: "/ti/auditoria", rotulo: "Auditoria", icone: "auditoria", permissao: "auditoria.ver" },
         { href: "/ti/configuracoes", rotulo: "Configurações", icone: "configuracoes", permissao: "perfil.ver" },
       ]),
     },
   ];
-  return grupos.filter((g) => g.itens.length > 0);
+  return { principal: comItens(principal), maisOpcoes: comItens(maisOpcoes) };
 }

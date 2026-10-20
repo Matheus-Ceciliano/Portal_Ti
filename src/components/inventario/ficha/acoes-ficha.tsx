@@ -10,11 +10,12 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Textarea } from "@/components/ui/textarea";
+import { ehComponente } from "@/lib/componentes";
 import { PODE_IR_PARA_MANUTENCAO, PODE_TRANSFERIR_COLABORADOR, type Situacao } from "@/lib/inventario";
 import { cn } from "@/lib/utils";
 import { acaoLiberarAvaliacao } from "@/server/acoes/inventario";
 import type { FichaEquipamento } from "@/server/modulos/inventario";
-import { DialogoEquipamento, type EmpresaOpcaoInventario } from "../dialogo-equipamento";
+import { DialogoEquipamento, type CatalogoCadastro, type EmpresaOpcaoInventario } from "../dialogo-equipamento";
 import { DialogoConcluirManutencao, DialogoEnviarManutencao } from "../dialogos-manutencao";
 import { identificacao } from "../visual";
 import { DialogoTransferirColaborador, DialogoTransferirEmpresa } from "./dialogos-transferencia";
@@ -31,12 +32,12 @@ const BLOQUEIO_CURTO: Partial<Record<Situacao, string>> = {
 export function AcoesFicha({
   ficha,
   empresas,
-  marcas,
+  catalogo,
   pode,
 }: {
   ficha: FichaEquipamento;
   empresas: EmpresaOpcaoInventario[];
-  marcas: string[];
+  catalogo: CatalogoCadastro;
   pode: { editar: boolean; transicionar: boolean; alocar: boolean; entregar: boolean };
 }) {
   const [aberto, setAberto] = useState<"editar" | "manutencao" | "concluir" | "avaliacao" | "colaborador" | "empresa" | null>(null);
@@ -49,7 +50,8 @@ export function AcoesFicha({
   };
   // Transferências: nunca de baixado nem de carregador vinculado (segue o notebook).
   const transferivel = ficha.situacao !== "BAIXADO" && !carregadorVinculado(ficha);
-  const transferirColaborador = transferivel && pode.alocar;
+  // RAM, SSD e HD não vão para pessoas: são instalados no notebook.
+  const transferirColaborador = transferivel && pode.alocar && !ehComponente(ficha.categoria);
   const transferirEmpresa = transferivel && pode.editar;
   const bloqueioColaborador = ficha.transferenciaPendente
     ? "Transferência reservada pendente"
@@ -109,7 +111,7 @@ export function AcoesFicha({
       </div>
 
       {pode.editar ? (
-        <DialogoEquipamento key={`e${chave}`} aberto={aberto === "editar"} aoMudar={mudar("editar")} equipamento={ficha} empresas={empresas} marcas={marcas} />
+        <DialogoEquipamento key={`e${chave}`} aberto={aberto === "editar"} aoMudar={mudar("editar")} equipamento={ficha} empresas={empresas} catalogo={catalogo} />
       ) : null}
       <DialogoEnviarManutencao
         key={`m${chave}`}

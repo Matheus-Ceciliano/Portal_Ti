@@ -75,6 +75,19 @@ export const pecasDaConfiguracao = (c: ConfiguracaoOriginal): EspecPeca[] => [
 export const compativeis = (a: TipoComponente, b: TipoComponente) => (a === "MEMORIA_RAM") === (b === "MEMORIA_RAM");
 
 /**
+ * Configuração original a partir do texto da ficha (cadastros antigos: "8 GB", "SSD 256 GB").
+ * Só especificação; o que não for reconhecido fica de fora (sem suposição).
+ */
+export function configuracaoDoTexto(memoriaRam: string | null, armazenamento: string | null): ConfiguracaoOriginal | null {
+  const s = sugerirConfiguracao(memoriaRam, armazenamento);
+  if (!s.memoria && !s.armazenamento) return null;
+  return {
+    memoria: s.memoria ? { capacidadeGb: s.memoria, tecnologia: s.tecnologia } : null,
+    armazenamento: s.armazenamento ? [s.armazenamento] : [],
+  };
+}
+
+/**
  * Sugestão para preencher o formulário a partir do texto antigo ("16 GB", "SSD 512 GB"). Só
  * preenche a tela; nada é gravado sem a confirmação da TI.
  */

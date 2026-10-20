@@ -122,10 +122,13 @@ export function normalizarIdentificador(valor: string | null | undefined): strin
 /** Letras sem acento, números, hífen, ponto, barra e sublinhado (etiquetas e nomes de rede). */
 export const FORMATO_IDENTIFICADOR = /^[A-Z0-9][A-Z0-9._/-]{0,39}$/;
 
-/** Carregador do notebook: nome do notebook + "C" + sequência (NBI5001 → NBI5001C1, NBI5001C2…). */
+/**
+ * Carregador do notebook: nome do notebook + ".C" + sequência (NBI5001 → NBI5001.C1,
+ * NBI5001.C2…), no mesmo padrão das peças de kit (KTM01.T). Carregadores antigos mantêm o nome.
+ */
 export function nomeCarregador(nomeNotebook: string, sequencia: number): string {
   if (!Number.isInteger(sequencia) || sequencia < 1) throw new Error("Sequência de carregador inválida.");
-  return `${normalizarIdentificador(nomeNotebook)}C${sequencia}`;
+  return `${normalizarIdentificador(nomeNotebook)}.C${sequencia}`;
 }
 
 /** Próxima posição livre na sequência de carregadores (as usadas nunca são reaproveitadas). */
@@ -199,6 +202,9 @@ export const ROTULO_MOTIVO_CARREGADOR: Record<(typeof MOTIVOS_CARREGADOR)[number
 export function situacaoAposDesvinculo(motivo: (typeof MOTIVOS_CARREGADOR)[number]): Situacao {
   return motivo === "PERDA" ? "BAIXADO" : "DEVOLVIDO_EM_AVALIACAO";
 }
+
+/** Número da alocação: AL + sequência de pelo menos 4 dígitos (AL0001, AL0032...). */
+export const numeroAlocacao = (sequencia: number) => `AL${String(sequencia).padStart(4, "0")}`;
 
 /** Número legível de documento: PREFIXO-AAAA-NNNN. */
 export function numeroDocumento(prefixo: string, ano: number, sequencia: number): string {

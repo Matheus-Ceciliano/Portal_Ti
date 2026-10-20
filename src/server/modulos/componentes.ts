@@ -2,6 +2,7 @@ import type { Ativo, TipoIntervencao } from "@/generated/prisma/client";
 import {
   CAPACIDADE_MAXIMA,
   COMPONENTES,
+  configuracaoDoTexto,
   compativeis,
   descreverPeca,
   ehComponente,
@@ -23,14 +24,15 @@ import { ErroAutorizacao, ErroNegocio, executarCasoDeUso, exigirPermissao } from
 import { prisma, type ClienteBanco, type Transacao } from "@/server/db";
 import {
   lerMomento,
-  marcaCanonica,
   mudarSituacao,
-  proximoIdentificadorComponente,
   registrarMovimentacao,
   traduzirConflito,
   travarAtivos,
   UUID,
 } from "./inventario-base";
+import { resolverFabricante, resolverPadraoMemoria } from "./catalogos";
+import { categoriaDoTipo } from "./categorias";
+import { gerarIdentificador } from "./identificacao-ativos";
 
 /**
  * Componentes internos dos notebooks (memória RAM, SSD e HD).
@@ -73,25 +75,29 @@ export type DadosComponente = {
   interfaceConexao?: string | null;
   formato?: string | null;
   frequenciaMhz?: number | string | null;
-  marca: string;
-  modelo: string;
+  /** Marca e modelo do catálogo (o modelo é da marca e da categoria do componente). */
+  marcaId?: string | null;
+  modeloId?: string | null;
   numeroSerie?: string | null;
   observacoes?: string | null;
 };
 
-/** Especificação e fabricante do componente, validados como no restante do inventário. */
-export async function validarComponente(db: ClienteBanco, d: DadosComponente) {
+/** Valores já gravados na peça (edição): itens inativos do catálogo continuam aceitos. */
+type AtualComponente = Pick<Ativo, "marcaId" | "modeloId" | "tecnologia" | "formato" | "frequenciaMhz"> | null;
+
+/**
+ * Especificação e fabricante do componente. Marca e modelo vêm do catálogo; tecnologia,
+ * formato e frequência da memória vêm dos padrões técnicos (aba Memórias).
+ */
+export async function validarComponente(db: ClienteBanco, d: DadosComponente, atual: AtualComponente = null) {
   const tipo = COMPONENTES.find((c) => c === d.categoria);
   if (!tipo) throw new ErroNegocio("Selecione o tipo do componente.");
   const capacidadeGb = inteiro(d.capacidadeGb);
   if (!Number.isInteger(capacidadeGb) || capacidadeGb <= 0 || capacidadeGb > CAPACIDADE_MAXIMA[tipo]) throw new ErroNegocio("Informe a capacidade.");
   const memoria = tipo === "MEMORIA_RAM";
-  const frequencia = memoria && d.frequenciaMhz !== null && d.frequenciaMhz !== undefined && String(d.frequenciaMhz).trim() ? inteiro(d.frequenciaMhz) : null;
-  if (frequencia !== null && (!Number.isInteger(frequencia) || frequencia < 100 || frequencia > 20000)) throw new ErroNegocio("Frequência: informe em MHz (ex.: 3200).");
-  const marca = textoLivre(d.marca, 60, "Marca");
-  const modelo = textoLivre(d.modelo, 80, "Modelo");
-  if (!marca) throw new ErroNegocio("Informe a marca.");
-  if (!modelo) throw new ErroNegocio("Informe o modelo.");
+  const categoria = await categoriaDoTipo(db, tipo);
+  const fabricante = await resolverFabricante(db, d, categoria.id, { atual });
+  const frequencia = memoria ? await resolverPadraoMemoria(db, "FREQUENCIA", d.frequenciaMhz, "Frequência", atual?.frequenciaMhz) : null;
   const serie = normalizarIdentificador(d.numeroSerie);
   if (serie && !FORMATO_IDENTIFICADOR.test(serie)) throw new ErroNegocio("Número de série: use letras sem acento, números, hífen, ponto ou barra (até 40).");
   return {
@@ -99,12 +105,14 @@ export async function validarComponente(db: ClienteBanco, d: DadosComponente) {
     dados: {
       categoria: tipo,
       capacidadeGb,
-      tecnologia: memoria ? opcao(d.tecnologia, TECNOLOGIAS_RAM, "Tecnologia") : null,
+      tecnologia: memoria ? await resolverPadraoMemoria(db, "TECNOLOGIA", d.tecnologia, "Tecnologia", atual?.tecnologia) : null,
       interfaceConexao: memoria ? null : opcao(d.interfaceConexao, INTERFACES[tipo], "Interface"),
-      formato: opcao(d.formato, FORMATOS[tipo], "Formato"),
-      frequenciaMhz: frequencia,
-      marca: await marcaCanonica(db, marca),
-      modelo,
+      formato: memoria ? await resolverPadraoMemoria(db, "FORMATO", d.formato, "Formato", atual?.formato) : opcao(d.formato, FORMATOS[tipo], "Formato"),
+      frequenciaMhz: frequencia === null ? null : Number(frequencia),
+      marcaId: fabricante.marcaId,
+      marca: fabricante.marca,
+      modeloId: fabricante.modeloId,
+      modelo: fabricante.modelo!,
       numeroSerie: serie || null,
       observacoes: textoLivre(d.observacoes, 1000, "Observações"),
     },
@@ -114,8 +122,8 @@ export async function validarComponente(db: ClienteBanco, d: DadosComponente) {
 export type ComponenteValidado = Awaited<ReturnType<typeof validarComponente>>;
 
 /**
- * Cadastra a peça no estoque (disponível) com o próximo identificador da sequência. Um nome
- * já usado por outro cadastro é pulado, nunca reaproveitado.
+ * Cadastra a peça no estoque (disponível) com o próximo identificador da categoria (RAM001,
+ * SSD001, HDD001...), gerado no banco: nunca repetido nem reaproveitado.
  */
 export async function criarComponente(
   tx: Transacao,
@@ -123,14 +131,20 @@ export async function criarComponente(
   c: ComponenteValidado,
   empresaId: string,
   observacao: string,
-  extra: { quando?: Date; chaveRequisicao?: string | null } = {},
+  extra: { quando?: Date; chaveRequisicao?: string | null; patrimonio?: string | null } = {},
 ) {
-  let nome = await proximoIdentificadorComponente(tx, c.tipo);
-  for (let i = 0; i < 20 && (await tx.ativo.findUnique({ where: { nomeDispositivo: nome }, select: { id: true } })); i++) {
-    nome = await proximoIdentificadorComponente(tx, c.tipo);
-  }
+  const categoria = await categoriaDoTipo(tx, c.tipo);
+  const nome = await gerarIdentificador(tx, categoria);
   const componente = await tx.ativo.create({
-    data: { ...c.dados, nomeDispositivo: nome, patrimonio: null, empresaId, criadoPorNome: ator.nome, chaveRequisicao: extra.chaveRequisicao ?? null },
+    data: {
+      ...c.dados,
+      categoriaId: categoria.id,
+      nomeDispositivo: nome,
+      patrimonio: extra.patrimonio ?? null,
+      empresaId,
+      criadoPorNome: ator.nome,
+      chaveRequisicao: extra.chaveRequisicao ?? null,
+    },
   });
   await registrarMovimentacao(tx, ator, componente.id, { tipo: "CADASTRO", situacaoNova: "DISPONIVEL", observacao, quando: extra.quando });
   return componente;
@@ -166,6 +180,45 @@ async function pecasVigentes(db: ClienteBanco, notebookId: string) {
 const textoLegado = (a: { memoriaRam: string | null; armazenamento: string | null }) =>
   [a.memoriaRam ? `RAM ${a.memoriaRam}` : null, a.armazenamento].filter(Boolean).join(" · ") || null;
 
+/**
+ * Notebook antigo (só o texto da ficha): na primeira intervenção, a memória e o armazenamento
+ * escritos na ficha viram a configuração original estruturada (só especificação, sem peça
+ * física), para que a peça vinculada some à memória existente e a substituta entre no lugar.
+ */
+async function estruturarFichaAntiga(tx: Transacao, ator: Ator, nb: { id: string; memoriaRam: string | null; armazenamento: string | null }, quando: Date) {
+  if ((await tx.pecaConfiguracao.count({ where: { equipamentoId: nb.id, original: true } })) > 0) return;
+  const config = configuracaoDoTexto(nb.memoriaRam, nb.armazenamento);
+  if (!config) return;
+  const pecas = pecasDaConfiguracao(config);
+  const intervencao = await tx.intervencaoConfiguracao.create({
+    data: {
+      equipamentoId: nb.id,
+      tipo: "CONFIGURACAO_ORIGINAL",
+      motivo: "Configuração da ficha do cadastro.",
+      configuracaoAnterior: textoLegado(nb),
+      configuracaoResultante: resumirConfiguracao(pecas).texto,
+      realizadaEm: quando,
+      realizadaPorContaId: ator.contaId,
+      realizadaPorNome: ator.nome,
+    },
+  });
+  for (const p of pecas) {
+    await tx.pecaConfiguracao.create({
+      data: {
+        equipamentoId: nb.id,
+        tipo: p.tipo,
+        original: true,
+        capacidadeGb: p.capacidadeGb,
+        tecnologia: p.tecnologia ?? null,
+        interfaceConexao: p.interfaceConexao ?? null,
+        instaladaEm: quando,
+        instaladaPorNome: ator.nome,
+        instaladaNaId: intervencao.id,
+      },
+    });
+  }
+}
+
 /** Ficha técnica (memória e armazenamento) sempre igual às peças vigentes. */
 async function sincronizarFicha(tx: Transacao, notebookId: string, pecas: EspecPeca[]) {
   const r = resumirConfiguracao(pecas);
@@ -173,15 +226,20 @@ async function sincronizarFicha(tx: Transacao, notebookId: string, pecas: EspecP
   return r;
 }
 
+/** Tecnologias de memória do catálogo (aba Memórias) aceitas na configuração original. */
+export async function tecnologiasMemoria(db: ClienteBanco) {
+  return (await db.padraoMemoria.findMany({ where: { tipo: "TECNOLOGIA" }, select: { valor: true } })).map((t) => t.valor);
+}
+
 /** Configuração original informada no formulário: vazia → nula (nada a gravar). */
-export function validarConfiguracao(c: unknown): ConfiguracaoOriginal | null {
+export function validarConfiguracao(c: unknown, tecnologias: readonly string[] = TECNOLOGIAS_RAM): ConfiguracaoOriginal | null {
   if (!c || typeof c !== "object") return null;
   const entrada = c as { memoria?: { capacidadeGb?: unknown; tecnologia?: string | null } | null; armazenamento?: unknown };
   let memoria: ConfiguracaoOriginal["memoria"] = null;
   if (entrada.memoria && String(entrada.memoria.capacidadeGb ?? "").trim()) {
     const gb = inteiro(entrada.memoria.capacidadeGb);
     if (!Number.isInteger(gb) || gb <= 0 || gb > CAPACIDADE_MAXIMA.MEMORIA_RAM) throw new ErroNegocio("Memória RAM: informe a capacidade total.");
-    memoria = { capacidadeGb: gb, tecnologia: opcao(entrada.memoria.tecnologia, TECNOLOGIAS_RAM, "Tecnologia da memória") };
+    memoria = { capacidadeGb: gb, tecnologia: opcao(entrada.memoria.tecnologia, tecnologias, "Tecnologia da memória") };
   }
   const lista = Array.isArray(entrada.armazenamento) ? entrada.armazenamento : [];
   if (lista.length > 4) throw new ErroNegocio("Armazenamento: informe no máximo 4 dispositivos.");
@@ -257,34 +315,6 @@ export async function aplicarConfiguracaoOriginal(
   // Texto sem setas e afins: o banco grava em WIN1252.
   await registrarMovimentacao(tx, ator, notebook.id, { tipo: "CONFIGURACAO_ORIGINAL", observacao: anterior ? `Antes: ${anterior}. Agora: ${resultante}.` : resultante, quando });
   return intervencao;
-}
-
-/** Configuração original informada (ou corrigida) depois do cadastro, antes de qualquer intervenção. */
-export async function definirConfiguracaoOriginal(ator: Ator, entrada: { notebookId: string; configuracao: unknown }) {
-  return executarCasoDeUso(ator, async () => {
-    const { origem } = exigirPermissao(ator, "ativo.editar");
-    exigirGrupo(ator);
-    if (!UUID.test(entrada.notebookId)) throw new ErroNegocio("Notebook não encontrado.");
-    const config = validarConfiguracao(entrada.configuracao);
-    if (!config) throw new ErroNegocio("Informe a memória RAM ou o armazenamento.");
-    return prisma.$transaction(async (tx) => {
-      await travarAtivos(tx, [entrada.notebookId]);
-      const nb = await tx.ativo.findUnique({ where: { id: entrada.notebookId } });
-      if (!nb || nb.categoria !== "NOTEBOOK") throw new ErroNegocio("Notebook não encontrado.");
-      const intervencao = await aplicarConfiguracaoOriginal(tx, ator, nb, config);
-      if (intervencao) {
-        await registrarAuditoria(tx, {
-          acao: "ativo.configuracao_original",
-          resultado: "SUCESSO",
-          ator: { contaId: ator.contaId, nome: ator.nome },
-          alvo: { tipo: "ativo", id: nb.id, descricao: nb.nomeDispositivo ?? nb.id },
-          origemPermissao: origem,
-          detalhe: { anterior: intervencao.configuracaoAnterior, resultante: intervencao.configuracaoResultante },
-        });
-      }
-      return { alterada: Boolean(intervencao) };
-    });
-  });
 }
 
 /* Intervenções: instalação, remoção e substituição */
@@ -395,10 +425,8 @@ async function intervir(ator: Ator, tipo: Exclude<TipoIntervencao, "CONFIGURACAO
         if (alocacao && !e.confirmacaoIntervencao) {
           throw new ErroNegocio(`O notebook está com ${alocacao.colaborador.nome} (${alocacao.numero}). Confirme que ele está disponível para a intervenção técnica.`);
         }
+        await estruturarFichaAntiga(tx, ator, nb, quando);
         const vigentes = await pecasVigentes(tx, nb.id);
-        if (!vigentes.length && textoLegado(nb) && !(await tx.intervencaoConfiguracao.count({ where: { equipamentoId: nb.id } }))) {
-          throw new ErroNegocio("Informe a configuração original do notebook antes de alterar os componentes.");
-        }
 
         const peca = remove ? (vigentes.find((p) => p.id === e.pecaId) ?? null) : null;
         if (remove && !peca) throw new ErroNegocio("Esta peça já foi removida. Atualize a ficha.");

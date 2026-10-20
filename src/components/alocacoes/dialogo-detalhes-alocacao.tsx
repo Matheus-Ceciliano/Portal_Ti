@@ -165,7 +165,9 @@ function Conteudo({ inicial, pode, destacarAtivo }: { inicial: AlocacaoCabecalho
                   ) : (
                     <Dado rotulo="Entrega prevista" valor={d.previstaPara ? formatarData(d.previstaPara) : "Sem data"} />
                   )}
-                  <Dado rotulo="Registrada" valor={`${formatarDataHora(d.criadaEm)} · ${d.criadaPorNome}`} />
+                  {/* Responsável TI (escolhido) e quem registrou a operação são informações distintas. */}
+                  <Dado rotulo="Responsável TI" valor={d.responsavelTi} />
+                  <Dado rotulo="Registrada por" valor={`${d.criadaPorNome} · ${formatarDataHora(d.criadaEm)}`} />
                   <Dado rotulo="Equipamentos com o colaborador" valor={String(estado === "ATIVA" ? abertos.length : 0)} />
                   {d.observacoes ? <Dado rotulo="Observações" valor={<span className="font-normal whitespace-pre-line">{d.observacoes}</span>} className="sm:col-span-2 lg:col-span-3" /> : null}
                   {d.canceladaEm ? <Dado rotulo="Cancelada" valor={`${formatarDataHora(d.canceladaEm)} · ${d.motivoCancelamento}`} className="sm:col-span-2 lg:col-span-3" /> : null}

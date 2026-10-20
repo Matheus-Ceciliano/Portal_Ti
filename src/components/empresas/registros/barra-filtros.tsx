@@ -16,6 +16,8 @@ export type DefFiltro = {
   valor: string;
   /** Lista longa ou variável (departamentos, categorias): seleção com busca interna. */
   pesquisavel?: boolean;
+  /** Filtros que dependem deste (ex.: modelo depende da marca): limpos quando este muda. */
+  limpa?: string[];
 };
 
 /**
@@ -55,8 +57,9 @@ export function BarraFiltros({
 
   return (
     <div className={cn("flex flex-col", compacta ? "gap-2" : "gap-2.5")} role="search" aria-label="Pesquisa e filtros">
-      <div className={compacta ? "flex flex-col gap-2 @5xl:flex-row" : muitos ? "flex flex-col gap-2" : "flex flex-col gap-2 lg:flex-row"}>
-        <div className={cn("min-w-0 flex-1", compacta && "@5xl:min-w-64")}>
+      {/* Compacta com até 4 filtros: pesquisa e filtros numa linha quando o cartão é largo. */}
+      <div className={compacta && !muitos ? "flex flex-col gap-2 @5xl:flex-row" : muitos ? "flex flex-col gap-2" : "flex flex-col gap-2 lg:flex-row"}>
+        <div className={cn("min-w-0 flex-1", compacta && !muitos && "@5xl:min-w-64")}>
           <label htmlFor={`${id}-busca`} className="sr-only">
             {rotuloBusca}
           </label>
@@ -64,13 +67,19 @@ export function BarraFiltros({
         </div>
         <div
           className={
-            compacta ? "grid grid-cols-2 gap-2 @3xl:grid-cols-4 @5xl:flex" : muitos ? "grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5" : "grid grid-cols-2 gap-2 sm:flex"
+            compacta
+              ? muitos
+                ? "grid grid-cols-2 gap-2 @3xl:grid-cols-3 @5xl:grid-cols-5"
+                : "grid grid-cols-2 gap-2 @3xl:grid-cols-4 @5xl:flex"
+              : muitos
+                ? "grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5"
+                : "grid grid-cols-2 gap-2 sm:flex"
           }
         >
           {filtros.map((f) => (
             <div
               key={f.chave}
-              className={compacta ? "min-w-0 @5xl:w-46 @5xl:shrink-0" : muitos ? "min-w-0" : filtros.length >= 4 ? "min-w-0 sm:w-44" : "min-w-0 sm:w-52"}
+              className={compacta && !muitos ? "min-w-0 @5xl:w-46 @5xl:shrink-0" : muitos ? "min-w-0" : filtros.length >= 4 ? "min-w-0 sm:w-44" : "min-w-0 sm:w-52"}
             >
               <label htmlFor={`${id}-${f.chave}`} className="sr-only">
                 {f.rotulo}

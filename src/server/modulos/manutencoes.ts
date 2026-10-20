@@ -229,7 +229,7 @@ export async function listarManutencoes(ator: Ator, f: FiltroManutencoes = {}, a
             marca: true,
             modelo: true,
             empresa: { select: { id: true, nome: true, sigla: true } },
-            fotos: { where: { contexto: "CADASTRO" }, orderBy: [{ tipo: "asc" }], take: 1, select: { id: true } },
+            fotos: { where: { contexto: "CADASTRO", removidaEm: null }, orderBy: [{ tipo: "asc" }], take: 1, select: { id: true } },
           },
         },
       },

@@ -7,6 +7,7 @@
 import type { CategoriaAtivo, Prisma, SituacaoAtivo } from "@/generated/prisma/client";
 import { nomeCarregador } from "@/lib/inventario";
 import type { prisma as clientePrisma } from "@/server/db";
+import { vincularCatalogosPorTexto } from "@/server/modulos/catalogos-texto";
 import { EMPRESAS, PESSOAS } from "./cadastros";
 
 const idAtivo = (n: number) => `c3a9e1b4-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -105,6 +106,13 @@ type Banco = typeof clientePrisma;
 export async function semearInventario(db: Banco): Promise<boolean> {
   if ((await db.ativo.count()) > 0) return false;
   await db.$transaction(async (tx) => {
+    // Categoria do catálogo pelo tipo (catálogo inicial criado pela migração).
+    const categorias = new Map((await tx.categoriaEquipamento.findMany({ where: { codigo: { not: null } }, select: { id: true, codigo: true } })).map((c) => [c.codigo!, c.id]));
+    const categoriaId = (tipo: string) => {
+      const id = categorias.get(tipo);
+      if (!id) throw new Error(`Categoria ${tipo} ausente do catálogo.`);
+      return id;
+    };
     const movimentos: Prisma.MovimentacaoAtivoCreateManyInput[] = [];
     const mov = (ativoId: string, m: Omit<Prisma.MovimentacaoAtivoCreateManyInput, "ativoId" | "realizadoPorNome">) =>
       movimentos.push({ ativoId, realizadoPorNome: OPERADOR, ...m });
@@ -115,6 +123,7 @@ export async function semearInventario(db: Banco): Promise<boolean> {
         data: {
           id: idAtivo(s.n),
           categoria: s.categoria,
+          categoriaId: categoriaId(s.categoria),
           nomeDispositivo: s.nome ?? null,
           patrimonio: s.patrimonio,
           empresaId: s.empresaId,
@@ -134,6 +143,7 @@ export async function semearInventario(db: Banco): Promise<boolean> {
           data: {
             id: idCarregador(s.n),
             categoria: "CARREGADOR",
+            categoriaId: categoriaId("CARREGADOR"),
             nomeDispositivo: nomeCarregador(s.nome!, 1),
             empresaId: s.empresaId,
             marca: s.marca,
@@ -280,6 +290,8 @@ export async function semearInventario(db: Banco): Promise<boolean> {
     for (const [chave, valor] of Object.entries(CONTADORES)) {
       await tx.contadorDocumento.upsert({ where: { chave }, create: { chave, valor }, update: {} });
     }
+    // Marca, modelo, processador e sistema dos equipamentos fictícios ligados aos Catálogos do Inventário.
+    await vincularCatalogosPorTexto(tx);
   });
   return true;
 }

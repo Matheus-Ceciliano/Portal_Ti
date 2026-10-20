@@ -3,13 +3,14 @@
 import { CalendarClock, CheckCircle2, Eye, FileClock, PackageCheck, Plus, Truck, type LucideIcon } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { FiltrosUrl } from "@/components/comum/filtros-url";
 import { CabecalhoPagina, EstadoVazio, formatarData } from "@/components/comum/pagina";
 import { Estado, StatusBadge } from "@/components/comum/status-badge";
-import { hrefCom, Paginacao, type Parametros } from "@/components/comum/tabela";
-import { BadgeTer, formatarDataHora } from "@/components/inventario/visual";
+import { CabecalhoOrdenavel, hrefCom, Paginacao, type Parametros } from "@/components/comum/tabela";
+import { formatarDataHora, TerCompacto } from "@/components/inventario/visual";
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import type { LinhaAlocacao, ResultadoAlocacoes } from "@/server/modulos/alocacoes";
 import { DialogoDetalhesAlocacao, type AlocacaoCabecalho, type PermissoesAlocacao } from "./dialogo-detalhes-alocacao";
@@ -17,30 +18,53 @@ import { DialogoNovaAlocacao } from "./dialogo-nova-alocacao";
 
 const BASE = "/ti/alocacoes";
 const th = "h-11 px-3 text-left align-middle text-[12.5px] font-semibold whitespace-nowrap text-muted-foreground first:pl-5";
-const td = "px-3 py-2.5 align-middle first:pl-5";
+/** Altura fixa e conteúdo em no máximo duas linhas sem quebra: todas as linhas ficam iguais. */
+const td = "h-[60px] px-3 py-2 align-middle first:pl-5";
+
+/** Encerrada ou cancelada: só consulta (cinza, textos atenuados, sem cor de alerta). */
+const encerrada = (l: LinhaAlocacao) => l.estado === "ENCERRADA" || l.estado === "CANCELADA";
+const FUNDO_ENCERRADA = "bg-muted/90 dark:bg-muted/55";
+/** Primeira encerrada da página (as encerradas vêm sempre depois das em aberto): recebe o separador. */
+const inicioEncerradas = (linhas: LinhaAlocacao[]) => linhas.findIndex(encerrada);
+
+/** "+N" com a lista completa no tooltip (os detalhes ficam na ficha da alocação). */
+function Mais({ itens, rotulo }: { itens: string[]; rotulo: string }) {
+  if (!itens.length) return null;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          tabIndex={0}
+          aria-label={`${rotulo}: ${itens.join(", ")}`}
+          className="tabular inline-flex h-5 shrink-0 items-center rounded-md bg-muted px-1.5 text-[11.5px] font-semibold text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+        >
+          +{itens.length}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-72">{itens.join(", ")}</TooltipContent>
+    </Tooltip>
+  );
+}
 
 const ESTADOS = [
-  { valor: "ATIVA", rotulo: "Entregue" },
+  { valor: "ATIVA", rotulo: "Alocada" },
   { valor: "RESERVADA", rotulo: "Reserva" },
   { valor: "ENCERRADA", rotulo: "Encerrada" },
   { valor: "CANCELADA", rotulo: "Cancelada" },
 ];
 
-function Equipamentos({ l }: { l: LinhaAlocacao }) {
-  const principais = l.itens.filter((i) => i.categoria !== "CARREGADOR");
-  const lista = principais.length ? principais : l.itens;
-  const extras = l.itens.length - Math.min(2, lista.length);
+/** Primeiro equipamento (o principal, não o carregador) e "+N" com os demais. */
+function Equipamentos({ l, atenuado }: { l: LinhaAlocacao; atenuado?: boolean }) {
+  const ordenados = [...l.itens.filter((i) => i.categoria !== "CARREGADOR"), ...l.itens.filter((i) => i.categoria === "CARREGADOR")];
+  const [primeiro, ...outros] = ordenados;
   return (
     <span className="block min-w-0">
-      <span className="tabular block truncate font-medium text-titulo" title={l.itens.map((i) => i.rotulo).join(", ")}>
-        {lista
-          .slice(0, 2)
-          .map((i) => i.rotulo)
-          .join(", ")}
+      <span className="flex min-w-0 items-center gap-1.5">
+        <span className={cn("tabular truncate font-medium", atenuado ? "text-foreground/75" : "text-titulo")}>{primeiro?.rotulo ?? "—"}</span>
+        <Mais itens={outros.map((i) => i.rotulo)} rotulo="Outros equipamentos" />
       </span>
-      <span className="block text-[12.5px] text-muted-foreground">
+      <span className="block truncate text-[12.5px] text-muted-foreground">
         {l.itens.length} {l.itens.length === 1 ? "item" : "itens"}
-        {extras > 0 ? ` · +${extras}` : ""}
       </span>
     </span>
   );
@@ -93,12 +117,14 @@ export function GestaoAlocacoes({
   const ver = (l: LinhaAlocacao) => setDetalhe({ id: l.id, numero: l.numero, colaborador: l.colaborador.nome, estado: l.estado });
   const i = resultado.indicadores;
   const indicadores: { titulo: string; valor: number; icone: LucideIcon; tom: string; filtro: Parametros }[] = [
-    { titulo: "Entregas ativas", valor: i.ativas, icone: CheckCircle2, tom: "text-sucesso", filtro: { situacao: "ATIVA" } },
+    { titulo: "Alocações ativas", valor: i.ativas, icone: CheckCircle2, tom: "text-sucesso", filtro: { situacao: "ATIVA" } },
     { titulo: "Reservas", valor: i.reservas, icone: CalendarClock, tom: "text-atencao", filtro: { situacao: "RESERVADA" } },
-    { titulo: "Equipamentos entregues", valor: i.equipamentosEntregues, icone: Truck, tom: "text-info", filtro: { situacao: "ATIVA" } },
-    { titulo: "Entregas sem TER assinado", valor: i.terPendente, icone: FileClock, tom: "text-atencao", filtro: { situacao: "ATIVA" } },
+    { titulo: "Equipamentos alocados", valor: i.equipamentosEntregues, icone: Truck, tom: "text-info", filtro: { situacao: "ATIVA" } },
+    { titulo: "Alocações sem TER assinado", valor: i.terPendente, icone: FileClock, tom: "text-atencao", filtro: { situacao: "ATIVA" } },
   ];
   const resumo = filtrando ? `${resultado.total} de ${resultado.totalGeral} alocações` : `${resultado.total} ${resultado.total === 1 ? "alocação" : "alocações"}`;
+  // Sem classificação escolhida: as mais recentes primeiro (o cabeçalho "Número" mostra a ordem).
+  const ordem: Parametros = { ...parametros, ordenar: parametros.ordenar ?? "numero", direcao: parametros.ordenar ? parametros.direcao : "desc" };
 
   return (
     <>
@@ -116,7 +142,7 @@ export function GestaoAlocacoes({
 
       <ul className="mb-4 grid grid-cols-2 gap-2 lg:grid-cols-4" data-testid="indicadores-alocacoes">
         {indicadores.map((c) => {
-          const ativo = parametros.situacao === c.filtro.situacao && c.titulo !== "Equipamentos entregues" && c.titulo !== "Entregas sem TER assinado";
+          const ativo = parametros.situacao === c.filtro.situacao && c.titulo === "Alocações ativas" || (parametros.situacao === "RESERVADA" && c.titulo === "Reservas");
           return (
             <li key={c.titulo} className="flex">
               <Link
@@ -181,65 +207,103 @@ export function GestaoAlocacoes({
                 <caption className="sr-only">Alocações de equipamentos</caption>
                 <thead className="border-b bg-muted/40">
                   <tr>
-                    <th scope="col" className={cn(th, "w-[18%] lg:w-[13%]")}>Número</th>
-                    <th scope="col" className={cn(th, "w-[25%] lg:w-[20%]")}>Colaborador</th>
-                    <th scope="col" className={cn(th, "w-[25%] lg:w-[21%]")}>Equipamentos</th>
-                    <th scope="col" className={cn(th, "hidden lg:table-cell lg:w-[10%]")}>Proprietária</th>
-                    <th scope="col" className={cn(th, "hidden lg:table-cell lg:w-[14%]")}>Entrega</th>
-                    <th scope="col" className={cn(th, "w-[20%] lg:w-[14%]")}>Situação</th>
+                    <CabecalhoOrdenavel base={BASE} parametros={ordem} campo="numero" className={cn(th, "w-[16%] lg:w-[12%]")}>
+                      Número
+                    </CabecalhoOrdenavel>
+                    <CabecalhoOrdenavel base={BASE} parametros={ordem} campo="colaborador" className={cn(th, "w-[27%] lg:w-[22%]")}>
+                      Colaborador
+                    </CabecalhoOrdenavel>
+                    <th scope="col" className={cn(th, "w-[25%] lg:w-[20%]")}>Equipamentos</th>
+                    <th scope="col" className={cn(th, "hidden lg:table-cell lg:w-[11%]")}>Proprietária</th>
+                    <CabecalhoOrdenavel base={BASE} parametros={ordem} campo="data" className={cn(th, "hidden lg:table-cell lg:w-[14%]")}>
+                      Entrega
+                    </CabecalhoOrdenavel>
+                    <CabecalhoOrdenavel base={BASE} parametros={ordem} campo="situacao" className={cn(th, "w-[20%] lg:w-[13%]")}>
+                      Situação
+                    </CabecalhoOrdenavel>
                     <th scope="col" className={cn(th, "w-[88px] pr-5 text-right")}>Ações</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y">
-                  {resultado.linhas.map((l) => (
-                    <tr key={l.id} className="cursor-pointer transition-colors hover:bg-accent/40" onClick={(e) => !(e.target as HTMLElement).closest("a,button") && ver(l)}>
-                      <td className={cn(td, "tabular font-semibold whitespace-nowrap text-titulo")}>{l.numero}</td>
-                      <td className={td}>
-                        <Link href={`/ti/cadastros/pessoas/${l.colaborador.id}`} className="block truncate font-medium text-titulo underline-offset-4 hover:underline">
-                          {l.colaborador.nome}
-                        </Link>
-                        <span className="block truncate text-[12.5px] text-muted-foreground" title={l.empresaColaborador.nome}>
-                          {l.empresaColaborador.sigla}
-                        </span>
-                      </td>
-                      <td className={td}>
-                        <Equipamentos l={l} />
-                      </td>
-                      <td className={cn(td, "hidden lg:table-cell")}>
-                        <span className="flex flex-wrap gap-1">
-                          {l.proprietarias.map((p) => (
-                            <StatusBadge key={p.id} tom={p.id === l.empresaColaborador.id ? "neutro" : "info"} className="text-[11px]">
-                              <span title={p.nome}>{p.sigla}</span>
-                            </StatusBadge>
-                          ))}
-                        </span>
-                      </td>
-                      <td className={cn(td, "hidden text-[13px] lg:table-cell")}>{data(l)}</td>
-                      <td className={td}>
-                        <span className="flex flex-col items-start gap-1">
-                          <Estado grupo="alocacao" valor={l.estado} />
-                          {l.estado === "ATIVA" || l.estado === "ENCERRADA" ? <BadgeTer estado={l.ter?.estado ?? null} /> : null}
-                        </span>
-                      </td>
-                      <td className={cn(td, "pr-5 text-right")}>
-                        <Button variant="ghost" size="icon-sm" aria-label={`Ver detalhes de ${l.numero}`} onClick={() => ver(l)}>
-                          <Eye aria-hidden />
-                        </Button>
-                      </td>
-                    </tr>
-                  ))}
+                  {resultado.linhas.map((l, indice) => {
+                    const fechada = encerrada(l);
+                    const [proprietaria, ...outrasProprietarias] = l.proprietarias;
+                    return (
+                      <Fragment key={l.id}>
+                        {indice === inicioEncerradas(resultado.linhas) ? (
+                          <tr className={FUNDO_ENCERRADA} data-testid="separador-encerradas">
+                            <th scope="rowgroup" colSpan={7} className="h-8 border-t-2 border-border px-5 text-left text-[12px] font-semibold text-muted-foreground">
+                              Encerradas e canceladas
+                            </th>
+                          </tr>
+                        ) : null}
+                        <tr
+                          data-estado={l.estado}
+                          className={cn(
+                            "cursor-pointer transition-colors",
+                            fechada ? cn(FUNDO_ENCERRADA, "text-muted-foreground hover:bg-muted dark:hover:bg-muted/70") : "hover:bg-accent/40",
+                          )}
+                          onClick={(e) => !(e.target as HTMLElement).closest("a,button,[tabindex]") && ver(l)}
+                        >
+                          <td className={cn(td, "tabular font-semibold whitespace-nowrap", fechada ? "text-muted-foreground" : "text-titulo")}>{l.numero}</td>
+                          <td className={td}>
+                            <Link
+                              href={`/ti/cadastros/pessoas/${l.colaborador.id}`}
+                              className={cn("block truncate font-medium underline-offset-4 hover:underline", fechada ? "text-foreground/75" : "text-titulo")}
+                            >
+                              {l.colaborador.nome}
+                            </Link>
+                            <span className="block truncate text-[12.5px] text-muted-foreground" title={l.empresaColaborador.nome}>
+                              {l.empresaColaborador.sigla}
+                            </span>
+                          </td>
+                          <td className={td}>
+                            <Equipamentos l={l} atenuado={fechada} />
+                          </td>
+                          <td className={cn(td, "hidden lg:table-cell")}>
+                            {proprietaria ? (
+                              <span className="flex items-center gap-1">
+                                <StatusBadge tom={proprietaria.id === l.empresaColaborador.id ? "neutro" : "info"} className="text-[11px]">
+                                  <span title={proprietaria.nome}>{proprietaria.sigla}</span>
+                                </StatusBadge>
+                                <Mais itens={outrasProprietarias.map((p) => p.nome)} rotulo="Outras empresas proprietárias" />
+                              </span>
+                            ) : null}
+                          </td>
+                          <td className={cn(td, "hidden text-[13px] whitespace-nowrap lg:table-cell", fechada && "text-muted-foreground")}>{data(l)}</td>
+                          <td className={td}>
+                            <span className="flex items-center gap-1.5 whitespace-nowrap">
+                              <Estado grupo="alocacao" valor={l.estado} />
+                              {l.estado === "ATIVA" || l.estado === "ENCERRADA" ? <TerCompacto estado={l.ter?.estado ?? null} /> : null}
+                            </span>
+                          </td>
+                          <td className={cn(td, "pr-5 text-right")}>
+                            <Button variant="ghost" size="icon-sm" aria-label={`Ver detalhes de ${l.numero}`} onClick={() => ver(l)}>
+                              <Eye aria-hidden />
+                            </Button>
+                          </td>
+                        </tr>
+                      </Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
             <ul className="divide-y md:hidden">
-              {resultado.linhas.map((l) => (
-                <li key={l.id}>
+              {resultado.linhas.map((l, indice) => (
+                <li key={l.id} className={cn(encerrada(l) && FUNDO_ENCERRADA)} data-estado={l.estado}>
+                  {indice === inicioEncerradas(resultado.linhas) ? (
+                    <p className="border-b px-4 py-1.5 text-[12px] font-semibold text-muted-foreground">Encerradas e canceladas</p>
+                  ) : null}
                   <button type="button" onClick={() => ver(l)} className="flex w-full flex-col gap-1.5 px-4 py-3 text-left hover:bg-accent/40 focus-visible:bg-accent/40 focus-visible:outline-none">
                     <span className="flex items-center justify-between gap-2">
-                      <span className="tabular font-semibold text-titulo">{l.numero}</span>
-                      <Estado grupo="alocacao" valor={l.estado} />
+                      <span className={cn("tabular font-semibold", encerrada(l) ? "text-muted-foreground" : "text-titulo")}>{l.numero}</span>
+                      <span className="flex items-center gap-1.5">
+                        <Estado grupo="alocacao" valor={l.estado} />
+                        {l.estado === "ATIVA" || l.estado === "ENCERRADA" ? <TerCompacto estado={l.ter?.estado ?? null} /> : null}
+                      </span>
                     </span>
-                    <span className="truncate text-[13.5px] text-titulo">
+                    <span className={cn("truncate text-[13.5px]", encerrada(l) ? "text-foreground/75" : "text-titulo")}>
                       {l.colaborador.nome} <span className="text-muted-foreground">· {l.empresaColaborador.sigla}</span>
                     </span>
                     <span className="truncate text-[12.5px] text-muted-foreground">

@@ -23,9 +23,9 @@ import { carregarAlvo } from "@/server/authz/ator";
 import { PERFIS_ADMINISTRATIVOS, type PerfilTi } from "@/server/authz/catalogo";
 import { ErroAutorizacao, ErroNegocio, executarCasoDeUso, exigirPermissao, pode } from "@/server/authz/exigir";
 import type { EstadoTermo } from "@/generated/prisma/client";
-import { ROTULO_CATEGORIA } from "@/lib/inventario";
 import { prisma, type ClienteBanco } from "@/server/db";
 import { garantirOutroAdministrador } from "./perfis";
+import { rotuloTipo, SELECAO_TIPO } from "./inventario-base";
 
 /* Listagem */
 
@@ -254,7 +254,7 @@ export async function obterDetalhePessoa(ator: Ator, colaboradorId: string) {
             where: { aberto: true, alocacao: { colaboradorId: c.id, estado: { in: ["ATIVA", "RESERVADA"] } } },
             orderBy: { alocacao: { criadaEm: "desc" } },
             include: {
-              ativo: { select: { id: true, categoria: true, patrimonio: true, nomeDispositivo: true, marca: true, modelo: true, numeroSerie: true } },
+              ativo: { select: { id: true, categoria: true, ...SELECAO_TIPO, patrimonio: true, nomeDispositivo: true, marca: true, modelo: true, numeroSerie: true } },
               alocacao: {
                 select: {
                   id: true,
@@ -285,7 +285,7 @@ export async function obterDetalhePessoa(ator: Ator, colaboradorId: string) {
       return {
         id: i.ativo.id,
         patrimonio: i.ativo.patrimonio ?? i.ativo.nomeDispositivo ?? "—",
-        tipo: ROTULO_CATEGORIA[i.ativo.categoria],
+        tipo: rotuloTipo(i.ativo),
         modelo: `${i.ativo.marca} ${i.ativo.modelo}`,
         numeroSerie: i.ativo.numeroSerie,
         nomeDispositivo: i.ativo.nomeDispositivo,

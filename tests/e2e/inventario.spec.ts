@@ -134,7 +134,7 @@ test.describe("Inventário (Supervisor TI)", () => {
     const d = page.getByTestId("dialogo-equipamento");
     await escolher(page, d, /^Categoria/, "Notebook");
     await d.getByLabel(/^Nome do dispositivo/).fill("nbi5001");
-    await expect(d.getByText("Carregador principal: NBI5001C1")).toBeVisible();
+    await expect(d.getByText("Carregador principal: NBI5001.C1")).toBeVisible();
     await d.getByLabel(/^Patrimônio/).fill("VLR-905001");
     await escolher(page, d, /^Empresa proprietária/, "Atalaia Serviços Administrativos Ltda.");
     await d.getByLabel(/^Marca/).fill("Dell");
@@ -149,15 +149,15 @@ test.describe("Inventário (Supervisor TI)", () => {
 
     await expect(page.getByRole("heading", { level: 1, name: "NBI5001" })).toBeVisible();
     const carregadores = page.getByTestId("carregadores");
-    await expect(carregadores).toContainText("NBI5001C1");
+    await expect(carregadores).toContainText("NBI5001.C1");
     await expect(carregadores).toContainText("Principal");
     await page.getByRole("button", { name: "Ampliar foto: Visão frontal" }).click();
     await expect(page.getByTestId("foto-ampliada")).toBeVisible();
     await page.keyboard.press("Escape");
 
-    await carregadores.getByRole("button", { name: "Adicionar carregador (NBI5001C2)" }).click();
-    await expect(carregadores).toContainText("NBI5001C2");
-    await carregadores.getByRole("button", { name: "Registrar troca, perda ou defeito de NBI5001C2" }).click();
+    await carregadores.getByRole("button", { name: "Adicionar carregador (NBI5001.C2)" }).click();
+    await expect(carregadores).toContainText("NBI5001.C2");
+    await carregadores.getByRole("button", { name: "Registrar troca, perda ou defeito de NBI5001.C2" }).click();
     const dc = page.getByTestId("dialogo-carregador");
     await escolher(page, dc, /^Motivo/, "Defeito");
     await expect(dc.getByText(/fica "devolvido em avaliação"/)).toBeVisible();
@@ -233,7 +233,7 @@ test.describe("Alocações (Supervisor TI)", () => {
     const pesquisa = n.getByPlaceholder(/Pesquisar por nome, patrimônio/);
     await pesquisa.fill("NBI4650");
     await n.getByRole("option", { name: /^NBI4650 · VLR-004650/ }).click();
-    await expect(n.getByRole("list", { name: "Equipamentos selecionados" })).toContainText("NBI4650C1"); // carregador junto
+    await expect(n.getByRole("list", { name: "Equipamentos selecionados" })).toContainText("NBI4650.C1"); // carregador junto
     await pesquisa.fill("VLR-004651");
     await n.getByRole("option", { name: /VLR-004651/ }).click();
     await expect(n.getByText("3 selecionados")).toBeVisible();

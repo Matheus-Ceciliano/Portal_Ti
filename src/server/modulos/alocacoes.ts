@@ -1,29 +1,33 @@
 import type { EstadoAlocacao, Prisma } from "@/generated/prisma/client";
 import { ehComponente } from "@/lib/componentes";
-import { CATEGORIAS_COMPONENTE, ESTADOS_FISICOS, ROTULO_CATEGORIA, ROTULO_SITUACAO, type Situacao } from "@/lib/inventario";
+import { CATEGORIAS_COMPONENTE, ESTADOS_FISICOS, ROTULO_SITUACAO, type Situacao } from "@/lib/inventario";
 import { registrarAuditoria } from "@/server/auditoria";
-import type { Ator } from "@/server/authz/ator";
-import { ErroAutorizacao, ErroNegocio, executarCasoDeUso, exigirPermissao } from "@/server/authz/exigir";
-import { prisma } from "@/server/db";
+import { carregarAtor, type Ator } from "@/server/authz/ator";
+import { PERFIS_TI } from "@/server/authz/catalogo";
+import { ErroAutorizacao, ErroNegocio, executarCasoDeUso, exigirPermissao, pode } from "@/server/authz/exigir";
+import { prisma, type ClienteBanco } from "@/server/db";
 import {
   cancelarTransferenciaPendente,
   dadosFoto,
   descartarFotos,
   encerrarAlocacaoSemItens,
   encerrarItem,
+  type FotoEnviada,
+  type FotoPreparada,
   gravarArquivosFotos,
   lerData,
   lerMomento,
   mudarSituacao,
   prepararFotos,
   proximoNumero,
+  proximoNumeroAlocacao,
   rotuloAtivo,
+  rotuloTipo,
+  SELECAO_TIPO,
   traduzirConflito,
   travarAtivos,
   urlFoto,
   UUID,
-  type FotoEnviada,
-  type FotoPreparada,
 } from "./inventario-base";
 
 /**
@@ -69,6 +73,9 @@ export type FiltroAlocacoes = {
   estado?: EstadoAlocacao;
   periodo?: "30" | "90" | "365";
   ordem?: "recentes" | "antigas";
+  /** Classificação pelas colunas da tabela; as encerradas continuam no fim. */
+  ordenar?: "numero" | "colaborador" | "data" | "situacao";
+  direcao?: "asc" | "desc";
   pagina?: number;
   porPagina?: number;
 };
@@ -97,13 +104,26 @@ function ondeAlocacoes(f: FiltroAlocacoes, agora = new Date()): Prisma.AlocacaoW
   };
 }
 
+/** Ordem de cada coluna (o número segue a ordem de registro: AL0033 vem depois de ALO-2026-0032). */
+const ORDEM_ALOCACOES: Record<NonNullable<FiltroAlocacoes["ordenar"]>, (d: "asc" | "desc") => Prisma.AlocacaoOrderByWithRelationInput[]> = {
+  numero: (d) => [{ criadaEm: d }, { numero: d }],
+  colaborador: (d) => [{ colaborador: { nome: d } }, { criadaEm: "desc" }],
+  data: (d) => [{ entregueEm: { sort: d, nulls: "last" } }, { previstaPara: { sort: d, nulls: "last" } }, { criadaEm: d }],
+  situacao: (d) => [{ estado: d }, { criadaEm: "desc" }],
+};
+
 export async function listarAlocacoes(ator: Ator, f: FiltroAlocacoes = {}) {
   return executarCasoDeUso(ator, async () => {
     exigirGrupo(ator, "ativo.ver");
     const where = ondeAlocacoes(f);
     const porPagina = f.porPagina ?? 12;
-    const [total, totalGeral, porEstado, equipamentosEntregues, terPendente] = await Promise.all([
+    // Em aberto (reservas e entregas) primeiro; encerradas e canceladas no fim da lista.
+    const emAberto: EstadoAlocacao[] = ["RESERVADA", "ATIVA"];
+    const ondeAbertas: Prisma.AlocacaoWhereInput = { AND: [where, { estado: { in: emAberto } }] };
+    const ondeFechadas: Prisma.AlocacaoWhereInput = { AND: [where, { estado: { notIn: emAberto } }] };
+    const [total, totalAbertas, totalGeral, porEstado, equipamentosEntregues, terPendente] = await Promise.all([
       prisma.alocacao.count({ where }),
+      prisma.alocacao.count({ where: ondeAbertas }),
       prisma.alocacao.count(),
       prisma.alocacao.groupBy({ by: ["estado"], _count: { _all: true } }),
       prisma.itemAlocacao.count({ where: { aberto: true, alocacao: { estado: "ATIVA" } } }),
@@ -111,25 +131,35 @@ export async function listarAlocacoes(ator: Ator, f: FiltroAlocacoes = {}) {
     ]);
     const paginas = Math.max(1, Math.ceil(total / porPagina));
     const pagina = Math.min(Math.max(1, f.pagina ?? 1), paginas);
-    const linhas = await prisma.alocacao.findMany({
-      where,
-      orderBy: [{ criadaEm: f.ordem === "antigas" ? "asc" : "desc" }, { numero: "desc" }],
-      skip: (pagina - 1) * porPagina,
-      take: porPagina,
-      include: {
-        colaborador: { select: { id: true, nome: true } },
-        empresaColaborador: { select: { id: true, nome: true, sigla: true } },
-        itens: {
-          orderBy: { ativo: { categoria: "asc" } },
-          select: {
-            aberto: true,
-            empresaProprietaria: { select: { id: true, sigla: true, nome: true } },
-            ativo: { select: { id: true, nomeDispositivo: true, patrimonio: true, modelo: true, categoria: true } },
-          },
-        },
-        termos: { where: { tipo: "TER", estado: { not: "CANCELADO" } }, orderBy: { criadoEm: "desc" }, take: 1, select: { numero: true, estado: true } },
-      },
-    });
+    const inicio = (pagina - 1) * porPagina;
+    const quantasAbertas = Math.max(0, Math.min(porPagina, totalAbertas - inicio));
+    const consulta = (onde: Prisma.AlocacaoWhereInput, skip: number, take: number) =>
+      take > 0
+        ? prisma.alocacao.findMany({
+            where: onde,
+            orderBy: f.ordenar ? ORDEM_ALOCACOES[f.ordenar](f.direcao === "asc" ? "asc" : "desc") : [{ criadaEm: f.ordem === "antigas" ? "asc" : "desc" }, { numero: "desc" }],
+            skip,
+            take,
+            include: {
+              colaborador: { select: { id: true, nome: true } },
+              empresaColaborador: { select: { id: true, nome: true, sigla: true } },
+              itens: {
+                orderBy: { ativo: { categoria: "asc" } },
+                select: {
+                  aberto: true,
+                  empresaProprietaria: { select: { id: true, sigla: true, nome: true } },
+                  ativo: { select: { id: true, nomeDispositivo: true, patrimonio: true, modelo: true, categoria: true } },
+                },
+              },
+              termos: { where: { tipo: "TER", estado: { not: "CANCELADO" } }, orderBy: { criadoEm: "desc" }, take: 1, select: { numero: true, estado: true } },
+            },
+          })
+        : Promise.resolve([]);
+    const [abertas, fechadas] = await Promise.all([
+      consulta(ondeAbertas, inicio, quantasAbertas),
+      consulta(ondeFechadas, Math.max(0, inicio - totalAbertas), porPagina - quantasAbertas),
+    ]);
+    const linhas = [...abertas, ...fechadas];
     const contar = (e: EstadoAlocacao) => porEstado.find((p) => p.estado === e)?._count._all ?? 0;
     return {
       linhas: linhas.map((a) => {
@@ -148,6 +178,7 @@ export async function listarAlocacoes(ator: Ator, f: FiltroAlocacoes = {}) {
           previstaPara: a.previstaPara?.toISOString().slice(0, 10) ?? null,
           criadaEm: a.criadaEm.toISOString(),
           ter: a.termos[0] ?? null,
+          responsavelTi: a.responsavelTiNome,
         };
       }),
       total,
@@ -187,6 +218,7 @@ export async function obterAlocacao(ator: Ator, id: string) {
                   select: {
                     id: true,
                     categoria: true,
+                    ...SELECAO_TIPO,
                     nomeDispositivo: true,
                     patrimonio: true,
                     marca: true,
@@ -194,13 +226,13 @@ export async function obterAlocacao(ator: Ator, id: string) {
                     numeroSerie: true,
                     situacao: true,
                     notebookId: true,
-                    fotos: { where: { contexto: "CADASTRO" }, orderBy: [{ tipo: "asc" }], take: 1, select: { id: true } },
+                    fotos: { where: { contexto: "CADASTRO", removidaEm: null }, orderBy: [{ tipo: "asc" }], take: 1, select: { id: true } },
                   },
                 },
                 itemDevolucao: {
                   include: {
                     devolucao: { select: { id: true, numero: true, recebidaEm: true, recebidaPorNome: true } },
-                    fotos: { select: { id: true, tipo: true } },
+                    fotos: { where: { removidaEm: null }, select: { id: true, tipo: true } },
                   },
                 },
               },
@@ -227,7 +259,10 @@ export async function obterAlocacao(ator: Ator, id: string) {
       entreguePorNome: a.entreguePorNome,
       previstaPara: a.previstaPara?.toISOString().slice(0, 10) ?? null,
       observacoes: a.observacoes,
+      /** Responsável TI escolhido (alocações anteriores à mudança não têm). */
+      responsavelTi: a.responsavelTiNome,
       criadaEm: a.criadaEm.toISOString(),
+      /** Quem registrou a operação no portal. */
       criadaPorNome: a.criadaPorNome,
       canceladaEm: a.canceladaEm?.toISOString() ?? null,
       motivoCancelamento: a.motivoCancelamento,
@@ -241,7 +276,7 @@ export async function obterAlocacao(ator: Ator, id: string) {
         ativo: {
           id: i.ativo.id,
           categoria: i.ativo.categoria,
-          rotuloCategoria: ROTULO_CATEGORIA[i.ativo.categoria],
+          rotuloCategoria: rotuloTipo(i.ativo),
           nome: i.ativo.nomeDispositivo,
           patrimonio: i.ativo.patrimonio,
           marca: i.ativo.marca,
@@ -299,13 +334,40 @@ export async function obterAlocacao(ator: Ator, id: string) {
 
 export type DetalheAlocacaoReal = Awaited<ReturnType<typeof obterAlocacao>>;
 
+/* Responsável TI */
+
+export type ResponsavelTi = { contaId: string; nome: string; cargo: string };
+
+/**
+ * Membros da TI que podem ser o Responsável TI de uma alocação: conta e cadastro ativos,
+ * perfil de TI com a ativação concluída e permissão para registrar alocações.
+ */
+export async function responsaveisTiElegiveis(db: ClienteBanco): Promise<ResponsavelTi[]> {
+  const contas = await db.contaAcesso.findMany({
+    where: { situacao: "ATIVA", colaborador: { situacao: "ATIVO", perfis: { some: { revogadoEm: null, perfil: { in: [...PERFIS_TI] } } } } },
+    select: { id: true },
+  });
+  const atores = await Promise.all(contas.map((c) => carregarAtor(db, c.id, { mfaVerificado: true })));
+  return atores
+    .filter((a): a is Ator => a !== null && pode(a, "alocacao.criar"))
+    .map((a) => ({ contaId: a.contaId, nome: a.nome, cargo: a.cargo }))
+    .sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
+}
+
+async function exigirResponsavelTi(db: ClienteBanco, contaId: string | null | undefined) {
+  if (!contaId) throw new ErroNegocio("Selecione o responsável TI.");
+  const ator = contaId.length <= 64 ? await carregarAtor(db, contaId, { mfaVerificado: true }) : null;
+  if (!ator || !ator.perfisAtribuidos.length || !pode(ator, "alocacao.criar")) throw new ErroNegocio("Responsável TI: escolha um membro da TI ativo e autorizado.");
+  return ator;
+}
+
 /* Opções do formulário de nova alocação */
 
 export async function opcoesNovaAlocacao(ator: Ator) {
   return executarCasoDeUso(ator, async () => {
     exigirPermissao(ator, "alocacao.criar");
     exigirGrupo(ator, "ativo.ver");
-    const [colaboradores, disponiveis] = await Promise.all([
+    const [colaboradores, disponiveis, responsaveis] = await Promise.all([
       prisma.colaborador.findMany({
         where: { situacao: { not: "DESLIGADO" } },
         orderBy: { nome: "asc" },
@@ -320,18 +382,30 @@ export async function opcoesNovaAlocacao(ator: Ator) {
         select: {
           id: true,
           categoria: true,
+          ...SELECAO_TIPO,
           nomeDispositivo: true,
           patrimonio: true,
           marca: true,
           modelo: true,
           notebookId: true,
+          sequenciaCarregador: true,
           empresa: { select: { id: true, nome: true, sigla: true } },
+          fotos: { where: { contexto: "CADASTRO", removidaEm: null }, orderBy: [{ tipo: "asc" }, { enviadaEm: "asc" }], take: 1, select: { id: true } },
         },
       }),
+      responsaveisTiElegiveis(prisma),
     ]);
     return {
       colaboradores,
-      equipamentos: disponiveis.map((a) => ({ ...a, rotulo: rotuloAtivo(a), rotuloCategoria: ROTULO_CATEGORIA[a.categoria] })),
+      equipamentos: disponiveis.map(({ categoriaEquipamento: _c, parteKit: _p, fotos, ...a }) => ({
+        ...a,
+        rotulo: rotuloAtivo(a),
+        rotuloCategoria: rotuloTipo({ categoriaEquipamento: _c, parteKit: _p }),
+        miniatura: fotos[0] ? urlFoto(fotos[0].id) : null,
+      })),
+      responsaveis,
+      /** Quem está registrando, quando é elegível: começa como responsável. */
+      responsavelPadrao: responsaveis.some((r) => r.contaId === ator.contaId) ? ator.contaId : null,
     };
   });
 }
@@ -345,6 +419,8 @@ export type EntradaAlocacao = {
   ativoIds: string[];
   /** ENTREGAR = entrega física agora (custódia muda); RESERVAR = entrega futura preparada. */
   modo: "ENTREGAR" | "RESERVAR";
+  /** Membro da TI responsável pela alocação (não é quem recebe os equipamentos). */
+  responsavelTiContaId: string;
   /** Entrega: data e hora (ISO, não futura). Reserva: data prevista (AAAA-MM-DD). */
   data?: string | null;
   observacoes?: string | null;
@@ -370,6 +446,7 @@ export async function criarAlocacao(ator: Ator, entrada: EntradaAlocacao) {
     if (!colaborador) throw new ErroNegocio("Selecione o colaborador.");
     if (colaborador.situacao === "DESLIGADO") throw new ErroNegocio("Colaborador desligado não recebe equipamentos.");
     const observacoes = textoOpcional(entrada.observacoes, 1000, "Observações");
+    const responsavel = await exigirResponsavelTi(prisma, entrada.responsavelTiContaId);
     const entregar = entrada.modo === "ENTREGAR";
     const entregueEm = entregar ? lerMomento(entrada.data, "Data da entrega") : null;
     const previstaPara = entregar ? null : lerData(entrada.data, "Data prevista");
@@ -398,7 +475,7 @@ export async function criarAlocacao(ator: Ator, entrada: EntradaAlocacao) {
           );
         }
         const quando = entregueEm ?? new Date();
-        const numero = await proximoNumero(tx, "ALO", quando);
+        const numero = await proximoNumeroAlocacao(tx);
         const alocacao = await tx.alocacao.create({
           data: {
             numero,
@@ -410,6 +487,9 @@ export async function criarAlocacao(ator: Ator, entrada: EntradaAlocacao) {
             previstaPara,
             observacoes,
             chaveRequisicao: chave,
+            responsavelTiContaId: responsavel.contaId,
+            responsavelTiNome: responsavel.nome,
+            criadaPorContaId: ator.contaId,
             criadaPorNome: ator.nome,
             itens: { create: ativos.map((a) => ({ ativoId: a.id, empresaProprietariaId: a.empresaId })) },
           },
@@ -419,7 +499,9 @@ export async function criarAlocacao(ator: Ator, entrada: EntradaAlocacao) {
             tipo: entregar ? "ENTREGA" : "RESERVA",
             colaborador,
             alocacaoId: alocacao.id,
-            observacao: entregar ? `${numero}: entrega física.` : `${numero}: reservado para entrega${previstaPara ? ` em ${previstaPara.toISOString().slice(0, 10).split("-").reverse().join("/")}` : ""}.`,
+            observacao: `${
+              entregar ? `${numero}: entrega física.` : `${numero}: reservado para entrega${previstaPara ? ` em ${previstaPara.toISOString().slice(0, 10).split("-").reverse().join("/")}` : ""}.`
+            } Responsável TI: ${responsavel.nome}.`,
             quando,
           });
         }
@@ -430,6 +512,7 @@ export async function criarAlocacao(ator: Ator, entrada: EntradaAlocacao) {
             modo: entrada.modo,
             equipamentos: ativos.length,
             equipamentosDeOutraEmpresa: outraEmpresa,
+            responsavelTi: responsavel.nome,
           }),
         );
         return { id: alocacao.id, numero, repetido: false };

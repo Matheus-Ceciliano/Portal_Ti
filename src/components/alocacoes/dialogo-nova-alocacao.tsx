@@ -32,10 +32,16 @@ type Equipamento = OpcoesNovaAlocacao["equipamentos"][number];
 const normalizar = (t: string) => t.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
 const hoje = () => agoraLocal().slice(0, 10);
 
+/** Carregador principal disponível do notebook: o vinculado de menor sequência (C1, depois C2...). */
+const carregadorPrincipal = (lista: Equipamento[], notebookId: string) =>
+  lista.filter((c) => c.notebookId === notebookId).sort((a, b) => (a.sequenciaCarregador ?? 99) - (b.sequenciaCarregador ?? 99))[0] ?? null;
+
 /**
- * Nova alocação: colaborador, um ou vários equipamentos disponíveis e o modo — entrega física
- * agora (a custódia muda já) ou reserva de entrega futura (ninguém fica responsável). A empresa
- * proprietária de cada equipamento é mantida; a do colaborador vem do cadastro dele.
+ * Nova alocação: colaborador, Responsável TI, um ou vários equipamentos disponíveis e o modo —
+ * entrega física agora (a custódia muda já) ou reserva de entrega futura (ninguém fica
+ * responsável). O notebook leva o carregador principal. A empresa proprietária de cada
+ * equipamento é mantida; a do colaborador vem do cadastro dele. O número (AL0001...) é gerado
+ * só ao confirmar, sem consumir a sequência na revisão.
  */
 export function DialogoNovaAlocacao({
   aberto,
@@ -53,6 +59,8 @@ export function DialogoNovaAlocacao({
   const [tentativa, setTentativa] = useState(0);
   const [empresaFiltro, setEmpresaFiltro] = useState("");
   const [colaboradorId, setColaboradorId] = useState("");
+  // Nulo = o padrão do servidor (quem está registrando, se elegível).
+  const [responsavelEscolhido, setResponsavelEscolhido] = useState<string | null>(null);
   const [selecionados, setSelecionados] = useState<string[]>([]);
   const [modo, setModo] = useState<"ENTREGAR" | "RESERVAR">(podeEntregar ? "ENTREGAR" : "RESERVAR");
   const [entrega, setEntrega] = useState(() => agoraLocal());
@@ -83,24 +91,28 @@ export function DialogoNovaAlocacao({
     return [...mapa.values()].sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
   }, [dados]);
   const colaborador = dados?.colaboradores.find((c) => c.id === colaboradorId) ?? null;
+  const responsavelId = responsavelEscolhido ?? dados?.responsavelPadrao ?? "";
+  const responsavel = dados?.responsaveis.find((r) => r.contaId === responsavelId) ?? null;
   const porId = useMemo(() => new Map((dados?.equipamentos ?? []).map((e) => [e.id, e])), [dados]);
   const escolhidos = selecionados.map((id) => porId.get(id)).filter((e): e is Equipamento => Boolean(e));
   const deOutraEmpresa = colaborador ? escolhidos.filter((e) => e.empresa.id !== colaborador.empresa.id) : [];
-  const alterado = Boolean(colaboradorId || selecionados.length || observacoes);
+  const alterado = Boolean(colaboradorId || selecionados.length || observacoes || responsavelEscolhido);
 
-  /** Notebook leva junto os carregadores disponíveis (podem ser retirados da seleção). */
+  /** Notebook leva junto o carregador principal (pode ser retirado da seleção); retirar o notebook retira os carregadores dele. */
   function alternar(e: Equipamento) {
     setErros((x) => ({ ...x, equipamentos: "" }));
     setSelecionados((atual) => {
-      if (atual.includes(e.id)) return atual.filter((id) => id !== e.id);
-      const carregadores = e.categoria === "NOTEBOOK" ? (dados?.equipamentos ?? []).filter((c) => c.notebookId === e.id && !atual.includes(c.id)).map((c) => c.id) : [];
-      return [...atual, e.id, ...carregadores];
+      if (atual.includes(e.id)) return atual.filter((id) => id !== e.id && porId.get(id)?.notebookId !== e.id);
+      const principal = e.categoria === "NOTEBOOK" ? carregadorPrincipal(dados?.equipamentos ?? [], e.id) : null;
+      // O mesmo carregador nunca entra duas vezes.
+      return [...new Set([...atual, e.id, ...(principal ? [principal.id] : [])])];
     });
   }
 
   function revisar() {
     const e: Record<string, string> = {};
     if (!colaboradorId) e.colaborador = "Selecione o colaborador.";
+    if (!responsavelId) e.responsavel = "Selecione o responsável TI.";
     if (!selecionados.length) e.equipamentos = "Selecione ao menos um equipamento disponível.";
     if (modo === "ENTREGAR" && !entrega) e.data = "Informe a data da entrega.";
     if (modo === "RESERVAR" && prevista && prevista < hoje()) e.data = "A data prevista não pode estar no passado.";
@@ -116,6 +128,7 @@ export function DialogoNovaAlocacao({
       colaboradorId,
       ativoIds: selecionados,
       modo,
+      responsavelTiContaId: responsavelId,
       data: modo === "ENTREGAR" ? localParaIso(entrega) : prevista || undefined,
       observacoes: observacoes || undefined,
       chaveRequisicao: chave,
@@ -149,7 +162,7 @@ export function DialogoNovaAlocacao({
         >
           <DialogHeader className="shrink-0 border-b px-6 pt-5 pr-14 pb-4">
             <DialogTitle>{etapa === "revisar" ? "Revisar alocação" : "Nova alocação"}</DialogTitle>
-            <DialogDescription className={etapa === "revisar" ? undefined : "sr-only"}>
+            <DialogDescription className="sr-only">
               {modo === "ENTREGAR" ? "Os equipamentos passam a ficar com o colaborador ao confirmar." : "Reserva: ninguém fica responsável até a confirmação da entrega."}
             </DialogDescription>
           </DialogHeader>
@@ -176,6 +189,7 @@ export function DialogoNovaAlocacao({
             ) : etapa === "revisar" ? (
               <Revisao
                 colaborador={colaborador!}
+                responsavel={responsavel?.nome ?? ""}
                 escolhidos={escolhidos}
                 modo={modo}
                 quando={modo === "ENTREGAR" ? entrega.replace("T", " ") : prevista}
@@ -186,7 +200,7 @@ export function DialogoNovaAlocacao({
               <div className="flex flex-col gap-5">
                 <fieldset className="grid gap-x-5 gap-y-4 sm:grid-cols-2 lg:grid-cols-12">
                   <legend className="mb-3 text-sm font-bold text-titulo">Colaborador</legend>
-                  <Campo rotulo="Empresa do colaborador" className="lg:col-span-5">
+                  <Campo rotulo="Empresa do colaborador" className="lg:col-span-4">
                     {(p) => (
                       <SelecaoPersonalizada
                         id={p.id}
@@ -201,7 +215,7 @@ export function DialogoNovaAlocacao({
                       />
                     )}
                   </Campo>
-                  <Campo rotulo="Colaborador" obrigatorio erro={erros.colaborador || undefined} className="lg:col-span-7">
+                  <Campo rotulo="Colaborador" obrigatorio erro={erros.colaborador || undefined} className="lg:col-span-4">
                     {(p) => (
                       <SelecaoPersonalizada
                         id={p.id}
@@ -218,6 +232,23 @@ export function DialogoNovaAlocacao({
                           .filter((c) => !empresaFiltro || c.empresa.id === empresaFiltro)
                           .map((c) => ({ valor: c.id, rotulo: c.nome, detalhe: c.empresa.sigla }))}
                         placeholder="Selecione o colaborador"
+                        pesquisavel
+                      />
+                    )}
+                  </Campo>
+                  <Campo rotulo="Responsável TI" obrigatorio erro={erros.responsavel || undefined} className="sm:col-span-2 lg:col-span-4">
+                    {(p) => (
+                      <SelecaoPersonalizada
+                        id={p.id}
+                        aria-describedby={p["aria-describedby"]}
+                        invalido={p["aria-invalid"]}
+                        valor={responsavelId}
+                        aoMudar={(v) => {
+                          setResponsavelEscolhido(v);
+                          setErros((x) => ({ ...x, responsavel: "" }));
+                        }}
+                        opcoes={dados.responsaveis.map((r) => ({ valor: r.contaId, rotulo: r.nome, detalhe: r.contaId === dados.responsavelPadrao ? "Você" : undefined }))}
+                        placeholder={dados.responsaveis.length ? "Selecione" : "Nenhum membro da TI elegível"}
                         pesquisavel
                       />
                     )}
@@ -242,15 +273,15 @@ export function DialogoNovaAlocacao({
 
                 <fieldset className="grid gap-x-5 gap-y-4 sm:grid-cols-2 lg:grid-cols-12">
                   <legend className="mb-3 text-sm font-bold text-titulo">Entrega</legend>
-                  <div className="flex flex-col gap-2 sm:col-span-2 lg:col-span-6" role="radiogroup" aria-label="Tipo de operação">
-                    <span className="text-[13px] font-semibold text-titulo">Operação</span>
-                    <div className="grid gap-2 sm:grid-cols-2">
+                  <div className="flex flex-col gap-2 lg:col-span-5" role="radiogroup" aria-label="Operação">
+                    <span className="text-[13px] leading-5 font-semibold text-titulo">Operação</span>
+                    <div className="grid h-11 grid-cols-2 gap-1 rounded-lg bg-muted p-1 lg:h-10">
                       {(
                         [
-                          ["ENTREGAR", "Entregar agora", "Entrega física: a custódia muda já.", Truck, !podeEntregar],
-                          ["RESERVAR", "Reservar", "Entrega futura; ninguém fica responsável.", CalendarClock, false],
+                          ["ENTREGAR", "Entregar agora", Truck, !podeEntregar],
+                          ["RESERVAR", "Reservar", CalendarClock, false],
                         ] as const
-                      ).map(([valor, titulo, texto, Icone, bloqueado]) => (
+                      ).map(([valor, titulo, Icone, bloqueado]) => (
                         <button
                           key={valor}
                           type="button"
@@ -259,20 +290,17 @@ export function DialogoNovaAlocacao({
                           disabled={bloqueado}
                           onClick={() => setModo(valor)}
                           className={cn(
-                            "flex items-start gap-2.5 rounded-lg border p-3 text-left transition-colors hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50",
-                            modo === valor && "border-primary bg-accent/70 dark:border-link",
+                            "flex items-center justify-center gap-2 rounded-md px-2 text-[13px] font-semibold whitespace-nowrap transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50",
+                            modo === valor ? "bg-card text-titulo shadow-nivel-1 dark:ring-1 dark:ring-white/10" : "text-muted-foreground hover:text-titulo",
                           )}
                         >
-                          <Icone className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
-                          <span>
-                            <span className="block font-semibold text-titulo">{titulo}</span>
-                            <span className="block text-[12.5px] text-muted-foreground">{texto}</span>
-                          </span>
+                          <Icone className="size-4 shrink-0" aria-hidden />
+                          {titulo}
                         </button>
                       ))}
                     </div>
                   </div>
-                  <Campo rotulo={modo === "ENTREGAR" ? "Data e hora da entrega" : "Data prevista"} obrigatorio={modo === "ENTREGAR"} erro={erros.data || undefined} className="lg:col-span-3">
+                  <Campo rotulo={modo === "ENTREGAR" ? "Data e hora da entrega" : "Data prevista"} obrigatorio={modo === "ENTREGAR"} erro={erros.data || undefined} className="lg:col-span-4">
                     {(p) =>
                       modo === "ENTREGAR" ? (
                         <Input {...p} type="datetime-local" value={entrega} max={agoraLocal()} onChange={(e) => setEntrega(e.target.value)} />
@@ -395,6 +423,7 @@ function SeletorEquipamentos({
           {equipamentos.map((e) => {
             const Icone = ICONE_CATEGORIA[e.categoria];
             const marcado = selecionados.includes(e.id);
+            const principal = e.categoria === "NOTEBOOK" ? carregadorPrincipal(equipamentos, e.id) : null;
             return (
               <Command.Item
                 key={e.id}
@@ -405,14 +434,27 @@ function SeletorEquipamentos({
                 <span className={cn("grid size-5 shrink-0 place-items-center rounded border", marcado ? "border-primary bg-primary text-primary-foreground" : "border-input bg-card")} aria-hidden>
                   {marcado ? <Check className="size-3.5" /> : null}
                 </span>
-                <Icone className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+                {e.miniatura ? (
+                  // eslint-disable-next-line @next/next/no-img-element -- rota privada com sessão
+                  <img src={e.miniatura} alt="" className="size-8 shrink-0 rounded-md border object-cover" loading="lazy" />
+                ) : (
+                  <span className="grid size-8 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground" aria-hidden>
+                    <Icone className="size-4" />
+                  </span>
+                )}
                 <span className="min-w-0 flex-1">
-                  <span className="tabular block truncate font-medium text-titulo">
+                  <span className="tabular block truncate font-semibold text-titulo">
                     {e.rotulo}
                     {e.nomeDispositivo && e.patrimonio ? <span className="font-normal text-muted-foreground"> · {e.patrimonio}</span> : null}
                   </span>
                   <span className="block truncate text-[12px] text-muted-foreground">
                     {e.rotuloCategoria} · {e.marca} {e.modelo}
+                    {principal ? (
+                      <span className="text-foreground/80">
+                        {" "}
+                        · <PlugZap className="inline size-3 align-[-1px]" aria-hidden /> leva {principal.rotulo}
+                      </span>
+                    ) : null}
                   </span>
                 </span>
                 <span className="shrink-0 text-[12px] font-medium text-muted-foreground" title={e.empresa.nome}>
@@ -425,13 +467,13 @@ function SeletorEquipamentos({
         </Command.List>
       </Command>
       {erro ? <p className="text-[13px] font-medium text-erro">{erro}</p> : null}
-      <p className="text-[12.5px] text-muted-foreground">Só aparecem equipamentos disponíveis. Notebook selecionado leva junto o carregador.</p>
     </div>
   );
 }
 
 function Revisao({
   colaborador,
+  responsavel,
   escolhidos,
   modo,
   quando,
@@ -439,6 +481,7 @@ function Revisao({
   outraEmpresa,
 }: {
   colaborador: OpcoesNovaAlocacao["colaboradores"][number];
+  responsavel: string;
   escolhidos: Equipamento[];
   modo: "ENTREGAR" | "RESERVAR";
   quando: string;
@@ -455,7 +498,11 @@ function Revisao({
           </span>
         </div>
       ) : null}
-      <dl className="grid gap-x-6 gap-y-3 rounded-xl border p-4 sm:grid-cols-2 lg:grid-cols-4">
+      <dl className="grid gap-x-6 gap-y-3 rounded-xl border p-4 sm:grid-cols-2 lg:grid-cols-4" data-testid="revisao-alocacao">
+        <div>
+          <dt className="text-[12.5px] text-muted-foreground">Número</dt>
+          <dd className="font-semibold text-muted-foreground">Gerado ao confirmar</dd>
+        </div>
         <div>
           <dt className="text-[12.5px] text-muted-foreground">Colaborador</dt>
           <dd className="font-semibold text-titulo">{colaborador.nome}</dd>
@@ -465,12 +512,23 @@ function Revisao({
           <dd className="font-semibold text-titulo">{colaborador.empresa.nome}</dd>
         </div>
         <div>
+          <dt className="text-[12.5px] text-muted-foreground">Responsável TI</dt>
+          <dd className="font-semibold text-titulo">{responsavel}</dd>
+        </div>
+        <div>
           <dt className="text-[12.5px] text-muted-foreground">Operação</dt>
-          <dd className="font-semibold text-titulo">{modo === "ENTREGAR" ? "Entrega física agora" : "Reserva"}</dd>
+          <dd className="font-semibold text-titulo">{modo === "ENTREGAR" ? "Entregar agora" : "Reservar"}</dd>
         </div>
         <div>
           <dt className="text-[12.5px] text-muted-foreground">{modo === "ENTREGAR" ? "Entrega" : "Prevista para"}</dt>
           <dd className="tabular font-semibold text-titulo">{quando ? quando.split(" ")[0].split("-").reverse().join("/") + (quando.includes(" ") ? ` ${quando.split(" ")[1]}` : "") : "Sem data"}</dd>
+        </div>
+        <div>
+          <dt className="text-[12.5px] text-muted-foreground">Equipamentos</dt>
+          <dd className="tabular font-semibold text-titulo">
+            {escolhidos.filter((e) => !e.notebookId).length}
+            {escolhidos.some((e) => e.notebookId) ? ` + ${escolhidos.filter((e) => e.notebookId).length} carregador(es)` : ""}
+          </dd>
         </div>
         {observacoes ? (
           <div className="sm:col-span-2 lg:col-span-4">
@@ -486,9 +544,9 @@ function Revisao({
             <li key={e.id} className="flex items-center gap-3 px-4 py-2.5">
               <Icone className="size-4 shrink-0 text-muted-foreground" aria-hidden />
               <span className="min-w-0 flex-1">
-                <span className="tabular block truncate font-medium text-titulo">{e.rotulo}</span>
+                <span className="tabular block truncate font-semibold text-titulo">{e.rotulo}</span>
                 <span className="block truncate text-[12.5px] text-muted-foreground">
-                  {e.rotuloCategoria} · {e.marca} {e.modelo}
+                  {e.notebookId ? `Carregador · acompanha ${escolhidos.find((n) => n.id === e.notebookId)?.rotulo ?? "o notebook"}` : `${e.rotuloCategoria} · ${e.marca} ${e.modelo}`}
                 </span>
               </span>
               <StatusBadge tom={e.empresa.id === colaborador.empresa.id ? "neutro" : "info"} className="text-[11px]">

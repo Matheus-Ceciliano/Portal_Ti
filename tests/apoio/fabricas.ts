@@ -4,12 +4,20 @@ import { gerarHashSenha } from "@/server/auth/senha";
 import { EMPRESAS, PESSOAS } from "@/server/dados-ficticios/cadastros";
 import { semearInventario } from "@/server/dados-ficticios/inventario";
 import { prisma } from "@/server/db";
+import { restaurarCatalogo } from "./catalogo";
 
 export async function limparBanco() {
   await prisma.$executeRawUnsafe(`
     TRUNCATE TABLE evento_auditoria, limite_tentativa, codigo_totp_usado, codigo_ativacao,
       fator_mfa, verificacao, credencial_conta, sessao, conta_acesso, permissao_individual,
-      perfil_atribuido, colaborador, empresa, instalacao, contador_documento CASCADE`);
+      perfil_atribuido, colaborador, empresa, instalacao, contador_documento, kit_equipamento,
+      historico_prefixo_categoria CASCADE`);
+  await restaurarCatalogo(prisma);
+}
+
+/** Id de uma família de processador do catálogo inicial (Intel Core i3/i5/i7). */
+export async function familiaId(codigo: "3" | "5" | "7") {
+  return (await prisma.familiaProcessador.findUniqueOrThrow({ where: { codigo }, select: { id: true } })).id;
 }
 
 export const senhaAleatoria = () => `Teste-${randomBytes(12).toString("base64url")}`;

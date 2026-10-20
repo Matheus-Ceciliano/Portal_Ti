@@ -1,4 +1,4 @@
-import { ArrowLeft, CalendarClock, Cpu, History, Images, Laptop, PackageCheck, PlugZap, Wrench } from "lucide-react";
+import { ArrowLeft, CalendarClock, Cpu, History, Images, Keyboard, Laptop, Link2, MemoryStick, PackageCheck, PlugZap, Wrench } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { formatarData } from "@/components/comum/pagina";
@@ -6,18 +6,22 @@ import { Estado } from "@/components/comum/status-badge";
 import { texto } from "@/components/comum/tabela";
 import { AcoesFicha } from "@/components/inventario/ficha/acoes-ficha";
 import { CarregadoresFicha } from "@/components/inventario/ficha/carregadores-ficha";
+import { ComponentesInternos } from "@/components/inventario/ficha/componentes-internos";
 import { AvisoTransferenciaReservada } from "@/components/inventario/ficha/dialogos-transferencia";
 import { paraTransferencia } from "@/components/inventario/ficha/transferencia";
 import { GaleriaFotos } from "@/components/inventario/ficha/galeria-fotos";
 import { formatarDataHora, identificacao, MiniaturaEquipamento } from "@/components/inventario/visual";
-import { COM_CONFIGURACAO, ROTULO_CATEGORIA, ROTULO_MOVIMENTACAO, ROTULO_SITUACAO, type Situacao } from "@/lib/inventario";
+import { formatarCapacidade } from "@/lib/componentes";
+import { ROTULO_PARTE } from "@/lib/identificacao";
+import { COM_CONFIGURACAO, ROTULO_DESTINO_REMOCAO, ROTULO_MOVIMENTACAO, ROTULO_SITUACAO, type DestinoRemocao, type Situacao } from "@/lib/inventario";
 import { lerPessoaOrigem, lerRetorno } from "@/lib/retorno-empresa";
 import { cn } from "@/lib/utils";
 import { exigirPaginaTi } from "@/server/auth/pagina";
 import { ErroNegocio, pode } from "@/server/authz/exigir";
 import { exigirEmpresa } from "@/server/modulos/empresa-registros";
 import { listarEmpresas } from "@/server/modulos/empresas";
-import { obterEquipamento, opcoesInventario } from "@/server/modulos/inventario";
+import { catalogoInventario } from "@/server/modulos/categorias";
+import { obterEquipamento } from "@/server/modulos/inventario";
 import { obterPessoa } from "@/server/modulos/pessoas";
 
 export const metadata = { title: "Equipamento" };
@@ -103,9 +107,13 @@ export default async function PaginaEquipamento({
   const podeTransicionar = pode(ator, "ativo.transicionar");
   // Encerrar a custódia de quem está com o equipamento equivale a registrar a devolução dele.
   const podeEntregar = pode(ator, "alocacao.confirmar_entrega") && (!ficha.responsavel || pode(ator, "devolucao.registrar"));
-  const [empresas, opcoes] = podeEditar ? await Promise.all([listarEmpresas(ator), opcoesInventario(ator)]) : [[], { marcas: [] }];
+  const [empresas, catalogo] = podeEditar
+    ? await Promise.all([listarEmpresas(ator), catalogoInventario(ator)])
+    : [[], { categorias: [], marcas: [], modelos: [], processadores: [], sistemas: [], memoria: [], podeGerir: false }];
   const configuracao = COM_CONFIGURACAO.includes(ficha.categoria);
   const ehNotebook = ficha.categoria === "NOTEBOOK";
+  const componente = ficha.componente;
+  const instalacaoAtual = componente?.instalacoes.find((i) => i.vigente) ?? null;
   const aberta = ficha.manutencoes.find((m) => m.aberta);
 
   return (
@@ -137,7 +145,7 @@ export default async function PaginaEquipamento({
             <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[13.5px] text-muted-foreground">
               {ficha.nome && ficha.patrimonio ? <span className="tabular font-semibold text-titulo">{ficha.patrimonio}</span> : null}
               <span>
-                {ROTULO_CATEGORIA[ficha.categoria]} · {ficha.marca} {ficha.modelo}
+                {ficha.rotuloTipo} · {ficha.marca} {ficha.modelo}
               </span>
               <Estado grupo="ativo" valor={ficha.situacao} />
             </p>
@@ -147,7 +155,7 @@ export default async function PaginaEquipamento({
           <AcoesFicha
             ficha={ficha}
             empresas={empresas.map((e) => ({ id: e.id, nome: e.nome, sigla: e.sigla, ativa: e.ativa }))}
-            marcas={opcoes.marcas}
+            catalogo={catalogo}
             pode={{ editar: podeEditar, transicionar: podeTransicionar, alocar: pode(ator, "alocacao.criar"), entregar: podeEntregar }}
           />
           <Link
@@ -167,10 +175,10 @@ export default async function PaginaEquipamento({
 
           <Secao titulo="Dados cadastrais" icone={Laptop}>
             <dl className="grid grid-cols-2 gap-x-4 gap-y-3.5 sm:gap-x-6 lg:grid-cols-3">
-              <Dado rotulo="Nome do dispositivo" valor={ficha.nome && <span className="tabular">{ficha.nome}</span>} />
-              <Dado rotulo="Patrimônio" valor={ficha.patrimonio && <span className="tabular">{ficha.patrimonio}</span>} />
+              <Dado rotulo={componente ? "Identificação" : "Nome do dispositivo"} valor={ficha.nome && <span className="tabular">{ficha.nome}</span>} />
+              {componente ? null : <Dado rotulo="Patrimônio" valor={ficha.patrimonio && <span className="tabular">{ficha.patrimonio}</span>} />}
               <Dado rotulo="Número de série" valor={ficha.numeroSerie && <span className="tabular">{ficha.numeroSerie}</span>} />
-              <Dado rotulo="Categoria" valor={ROTULO_CATEGORIA[ficha.categoria]} />
+              <Dado rotulo="Categoria" valor={ficha.rotuloTipo} />
               <Dado rotulo="Marca" valor={ficha.marca} />
               <Dado rotulo="Modelo" valor={ficha.modelo} />
               <Dado
@@ -185,8 +193,12 @@ export default async function PaginaEquipamento({
                   )
                 }
               />
-              <Dado rotulo="Data de aquisição" valor={ficha.dataAquisicao ? formatarData(ficha.dataAquisicao) : undefined} />
-              <Dado rotulo="Garantia até" valor={ficha.garantiaAte ? formatarData(ficha.garantiaAte) : undefined} />
+              {componente ? null : (
+                <>
+                  <Dado rotulo="Data de aquisição" valor={ficha.dataAquisicao ? formatarData(ficha.dataAquisicao) : undefined} />
+                  <Dado rotulo="Garantia até" valor={ficha.garantiaAte ? formatarData(ficha.garantiaAte) : undefined} />
+                </>
+              )}
               <Dado rotulo="Situação" valor={<span className="inline-flex items-center gap-2"><Estado grupo="ativo" valor={ficha.situacao} /></span>} />
               <Dado rotulo="Na situação desde" valor={formatarDataHora(ficha.situacaoDesde)} />
               <Dado rotulo="Cadastrado" valor={`${formatarData(ficha.criadoEm)}${ficha.criadoPorNome ? ` · ${ficha.criadoPorNome}` : ""}`} />
@@ -198,10 +210,43 @@ export default async function PaginaEquipamento({
             <Secao titulo="Configuração" icone={Cpu}>
               <dl className="grid grid-cols-2 gap-x-4 gap-y-3.5 sm:gap-x-6 lg:grid-cols-4">
                 <Dado rotulo="Processador" valor={ficha.processador} />
-                <Dado rotulo="Memória RAM" valor={ficha.memoriaRam} />
-                <Dado rotulo="Armazenamento" valor={ficha.armazenamento} />
+                {/* Notebook: a mesma soma do card de componentes internos (configuração original + peças vinculadas). */}
+                <Dado rotulo="Memória RAM" valor={ficha.componentesInternos?.resumo.memoria ?? ficha.memoriaRam} />
+                <Dado rotulo="Armazenamento" valor={ficha.componentesInternos?.resumo.armazenamento ?? ficha.armazenamento} />
                 <Dado rotulo="Sistema operacional" valor={ficha.sistemaOperacional} />
               </dl>
+            </Secao>
+          ) : null}
+
+          {componente ? (
+            <Secao titulo="Especificação" icone={MemoryStick}>
+              <dl className="grid grid-cols-2 gap-x-4 gap-y-3.5 sm:gap-x-6 lg:grid-cols-4">
+                <Dado rotulo="Capacidade" valor={formatarCapacidade(componente.capacidadeGb)} />
+                {ficha.categoria === "MEMORIA_RAM" ? <Dado rotulo="Tecnologia" valor={componente.tecnologia} /> : <Dado rotulo="Interface" valor={componente.interfaceConexao} />}
+                <Dado rotulo="Formato" valor={componente.formato} />
+                {ficha.categoria === "MEMORIA_RAM" ? <Dado rotulo="Frequência" valor={componente.frequenciaMhz ? `${componente.frequenciaMhz} MHz` : undefined} /> : null}
+              </dl>
+            </Secao>
+          ) : null}
+
+          {ficha.componentesInternos ? (
+            <Secao titulo="Componentes internos" icone={MemoryStick}>
+              <ComponentesInternos
+                notebook={{
+                  id: ficha.id,
+                  rotulo: identificacao(ficha),
+                  alocado: ficha.responsavel ? { colaborador: ficha.responsavel.nome, alocacao: ficha.responsavel.alocacao } : null,
+                  memoriaRam: ficha.memoriaRam,
+                  armazenamento: ficha.armazenamento,
+                  componentes: ficha.componentesInternos,
+                }}
+                pode={{
+                  intervir: ficha.situacao !== "BAIXADO" && podeEditar && podeTransicionar,
+                  criar: pode(ator, "ativo.criar"),
+                  baixar: pode(ator, "ativo.baixar"),
+                }}
+                catalogo={catalogo}
+              />
             </Secao>
           ) : null}
 
@@ -247,7 +292,36 @@ export default async function PaginaEquipamento({
 
         {/* No celular, alocação, carregadores e manutenções vêm antes das fotos e do histórico. */}
         <div className="order-first flex min-w-0 flex-col gap-4 lg:order-none">
-          {/* Entrega, responsável e TER são consultados em Alocações; aqui só a referência. */}
+          {/* Componente não é alocado a pessoas: mostra onde está instalado. */}
+          {componente ? (
+            <Secao titulo="Instalação" icone={Link2}>
+              {instalacaoAtual ? (
+                <p className="text-sm">
+                  Instalado em{" "}
+                  <Link href={`/ti/inventario/${instalacaoAtual.notebook.id}`} className="tabular font-semibold text-link underline-offset-4 hover:underline">
+                    {instalacaoAtual.notebook.nome}
+                  </Link>{" "}
+                  <span className="text-muted-foreground">desde {formatarDataHora(instalacaoAtual.instaladaEm)}</span>
+                </p>
+              ) : (
+                <p className="text-[13px] text-muted-foreground">Não está instalado em notebook.</p>
+              )}
+              {componente.instalacoes.some((i) => !i.vigente) ? (
+                <ul className="mt-3 flex flex-col gap-2 border-t pt-3" aria-label="Instalações anteriores">
+                  {componente.instalacoes
+                    .filter((i) => !i.vigente)
+                    .map((i) => (
+                      <li key={i.id} className="text-[12.5px] text-muted-foreground">
+                        <span className="tabular font-medium text-foreground">{i.notebook.nome}</span>
+                        {i.original ? " (peça original)" : ""} · {formatarDataHora(i.instaladaEm)} até {i.removidaEm ? formatarDataHora(i.removidaEm) : "—"}
+                        {i.destino ? ` · ${ROTULO_DESTINO_REMOCAO[i.destino as DestinoRemocao]}` : ""}
+                        {i.motivoRemocao ? ` · ${i.motivoRemocao}` : ""}
+                      </li>
+                    ))}
+                </ul>
+              ) : null}
+            </Secao>
+          ) : (
           <Secao titulo="Alocação" icone={PackageCheck}>
             {ficha.responsavel || ficha.reserva ? (
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -273,10 +347,33 @@ export default async function PaginaEquipamento({
               />
             ) : null}
           </Secao>
+          )}
 
           {ehNotebook ? (
             <Secao titulo="Carregadores" icone={PlugZap}>
               <CarregadoresFicha ficha={ficha} podeEditar={podeEditar} />
+            </Secao>
+          ) : null}
+          {/* Peça de kit: o kit é só o agrupador; cada peça tem ficha, fotos e histórico próprios. */}
+          {ficha.kit ? (
+            <Secao titulo={`Kit ${ficha.kit.codigo}`} icone={Keyboard}>
+              <ul className="flex flex-col gap-2" data-testid="pecas-do-kit">
+                {ficha.kit.partes.map((p) => (
+                  <li key={p.id} className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                    <span className="flex items-center gap-2">
+                      {p.id === ficha.id ? (
+                        <span className="tabular font-semibold text-titulo">{p.nome}</span>
+                      ) : (
+                        <Link href={`/ti/inventario/${p.id}`} className="tabular font-semibold text-link underline-offset-4 hover:underline">
+                          {p.nome}
+                        </Link>
+                      )}
+                      <span className="text-[12.5px] text-muted-foreground">{ROTULO_PARTE[p.parte]}</span>
+                    </span>
+                    <Estado grupo="ativo" valor={p.situacao} />
+                  </li>
+                ))}
+              </ul>
             </Secao>
           ) : null}
           {ficha.notebook ? (

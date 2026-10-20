@@ -23,8 +23,9 @@ export function liberarFotos(fotos: FotosSelecionadas) {
 
 /**
  * Fotos por tipo (nenhuma é obrigatória). As imagens são reduzidas no navegador antes do envio;
- * o servidor confere tipo, tamanho e quantidade de novo. Fotos já gravadas aparecem só para
- * consulta: registros de evidência não são substituídos.
+ * o servidor confere tipo, tamanho e quantidade de novo. Fotos já gravadas aparecem para
+ * consulta; na edição do cadastro, quem pode tratar evidências marca as que devem sair
+ * (a remoção vale ao salvar e preserva o registro).
  */
 export function CampoFotos({
   tipos,
@@ -34,11 +35,18 @@ export function CampoFotos({
   erro,
   compacto,
   rotulo = "Fotos",
+  removidas = [],
+  aoRemoverExistente,
+  aoDesfazerRemocoes,
 }: {
   tipos: readonly TipoFoto[];
   valor: FotosSelecionadas;
   aoMudar: (proximo: FotosSelecionadas) => void;
   existentes?: { id: string; tipo: string; url: string }[];
+  /** Fotos gravadas marcadas para sair ao salvar. */
+  removidas?: string[];
+  aoRemoverExistente?: (id: string) => void;
+  aoDesfazerRemocoes?: () => void;
   erro?: string;
   /** Um só tipo, em linha (manutenção, devolução). */
   compacto?: boolean;
@@ -83,14 +91,25 @@ export function CampoFotos({
             key={tipo}
             tipo={tipo}
             fotos={valor[tipo] ?? []}
-            existentes={existentes.filter((e) => e.tipo === tipo)}
+            existentes={existentes.filter((e) => e.tipo === tipo && !removidas.includes(e.id))}
             processando={processando === tipo}
             aoAdicionar={(arquivos) => void adicionar(tipo, arquivos)}
             aoRemover={(id) => remover(tipo, id)}
+            aoRemoverExistente={aoRemoverExistente}
             compacto={compacto}
           />
         ))}
       </ul>
+      {removidas.length ? (
+        <p className="flex flex-wrap items-center gap-x-2 text-[13px] text-muted-foreground" role="status" data-testid="fotos-a-remover">
+          {removidas.length === 1 ? "1 foto será removida ao salvar." : `${removidas.length} fotos serão removidas ao salvar.`}
+          {aoDesfazerRemocoes ? (
+            <button type="button" onClick={aoDesfazerRemocoes} className="font-semibold text-link underline-offset-4 hover:underline">
+              Desfazer
+            </button>
+          ) : null}
+        </p>
+      ) : null}
       {mensagem ? (
         <p id={idErro} className={cn("text-[13px] leading-[18px]", erro ? "font-medium text-erro" : "text-muted-foreground")}>
           {mensagem}
@@ -107,6 +126,7 @@ function Tipo({
   processando,
   aoAdicionar,
   aoRemover,
+  aoRemoverExistente,
   compacto,
 }: {
   tipo: TipoFoto;
@@ -115,6 +135,7 @@ function Tipo({
   processando: boolean;
   aoAdicionar: (arquivos: FileList | null) => void;
   aoRemover: (id: string) => void;
+  aoRemoverExistente?: (id: string) => void;
   compacto?: boolean;
 }) {
   const id = useId();
@@ -127,9 +148,23 @@ function Tipo({
         {quantidade ? <span className="tabular text-[12px] text-muted-foreground">{quantidade}</span> : null}
       </div>
       <div className="flex flex-wrap gap-1.5">
-        {existentes.map((e) => (
-          // eslint-disable-next-line @next/next/no-img-element -- rota privada com sessão
-          <img key={e.id} src={e.url} alt={`${rotulo} (já gravada)`} className="size-12 rounded-md border object-cover" loading="lazy" />
+        {existentes.map((e, i) => (
+          <span key={e.id} className="relative">
+            <a href={e.url} target="_blank" rel="noreferrer" className="block rounded-md focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none">
+              {/* eslint-disable-next-line @next/next/no-img-element -- rota privada com sessão */}
+              <img src={e.url} alt={`${rotulo} (já gravada)`} className="size-12 rounded-md border object-cover" loading="lazy" />
+            </a>
+            {aoRemoverExistente ? (
+              <button
+                type="button"
+                onClick={() => aoRemoverExistente(e.id)}
+                aria-label={`Remover ${rotulo.toLowerCase()} gravada, foto ${i + 1}`}
+                className="absolute -top-1.5 -right-1.5 grid size-5 place-items-center rounded-full border bg-card text-muted-foreground shadow-nivel-1 hover:text-erro focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+              >
+                <X className="size-3" aria-hidden />
+              </button>
+            ) : null}
+          </span>
         ))}
         {fotos.map((f, i) => (
           <span key={f.id} className="relative">

@@ -1,7 +1,7 @@
 "use client";
 
 import { Command } from "cmdk";
-import { Check, ChevronDown, Loader2, Search } from "lucide-react";
+import { Check, ChevronDown, Loader2, Plus, Search } from "lucide-react";
 import { Select as SelectPrimitive } from "radix-ui";
 import { useId, useState } from "react";
 import { classeControle } from "@/components/ui/input";
@@ -44,6 +44,8 @@ type Props = {
   destacado?: boolean;
   /** Para formulários: envia o valor em um campo oculto com este nome. */
   name?: string;
+  /** Ação "+ Criar novo" ao final das opções (abre o cadastro no catálogo). */
+  criar?: { rotulo?: string; aoCriar: () => void };
   className?: string;
   "aria-label"?: string;
   "aria-describedby"?: string;
@@ -51,6 +53,8 @@ type Props = {
 
 /** Item técnico da opção vazia: o Radix Select não aceita valor "" em itens. */
 const VAZIO = "__vazio__";
+/** Item técnico da ação "+ Criar novo". */
+const CRIAR = "__criar__";
 
 const normalizar = (t: string) => t.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
 
@@ -75,6 +79,9 @@ const classeItem = cn(
   "data-highlighted:bg-accent data-highlighted:text-accent-foreground data-[selected=true]:bg-accent data-[selected=true]:text-accent-foreground",
   "data-disabled:pointer-events-none data-disabled:opacity-50",
 );
+
+/** "+ Criar novo": separado das opções por uma linha, em cor de ação. */
+const classeCriar = cn(classeItem, "mt-1 font-semibold text-link before:absolute before:inset-x-1 before:-top-[3px] before:h-px before:bg-border");
 
 function IconeFinal({ carregando }: { carregando?: boolean }) {
   return carregando ? (
@@ -107,13 +114,19 @@ function SelecaoSimples({
   destacado,
   name,
   className,
+  criar,
   ...aria
 }: Props) {
   const atual = valor === "" ? (vazio !== undefined ? VAZIO : "") : valor;
   // Texto explícito: aparece já na renderização do servidor, antes de o menu existir.
   const rotuloAtual = valor === "" ? vazio : opcoes.find((o) => o.valor === valor)?.rotulo;
   return (
-    <SelectPrimitive.Root value={atual} onValueChange={(v) => aoMudar(v === VAZIO ? "" : v)} disabled={desabilitado || carregando} name={name}>
+    <SelectPrimitive.Root
+      value={atual}
+      onValueChange={(v) => (v === CRIAR ? criar?.aoCriar() : aoMudar(v === VAZIO ? "" : v))}
+      disabled={desabilitado || carregando}
+      name={name}
+    >
       <SelectPrimitive.Trigger
         id={id}
         aria-invalid={invalido || undefined}
@@ -138,6 +151,12 @@ function SelecaoSimples({
             {opcoes.map((o) => (
               <ItemSimples key={o.valor} {...o} />
             ))}
+            {criar ? (
+              <SelectPrimitive.Item value={CRIAR} className={classeCriar}>
+                <Plus className="size-4 shrink-0" aria-hidden />
+                <SelectPrimitive.ItemText>{criar.rotulo ?? "Criar novo"}</SelectPrimitive.ItemText>
+              </SelectPrimitive.Item>
+            ) : null}
           </SelectPrimitive.Viewport>
         </SelectPrimitive.Content>
       </SelectPrimitive.Portal>
@@ -170,6 +189,7 @@ function ComboboxPesquisavel({
   destacado,
   name,
   className,
+  criar,
   ...aria
 }: Props) {
   const [aberto, setAberto] = useState(false);
@@ -224,7 +244,7 @@ function ComboboxPesquisavel({
               />
             </div>
             <Command.List label="Opções" className="max-h-72 overflow-y-auto overscroll-contain p-1.5">
-              <Command.Empty className="px-3 py-6 text-center text-[13px] text-muted-foreground">Nenhuma opção encontrada.</Command.Empty>
+              <Command.Empty className={cn("px-3 text-center text-[13px] text-muted-foreground", criar ? "py-3" : "py-6")}>Nenhuma opção encontrada.</Command.Empty>
               {todas.map((o) => {
                 const marcada = o.valor === VAZIO ? valor === "" : o.valor === valor;
                 return (
@@ -246,6 +266,21 @@ function ComboboxPesquisavel({
                   </Command.Item>
                 );
               })}
+              {criar ? (
+                // Sempre visível, mesmo com a pesquisa sem resultados.
+                <Command.Item
+                  value={CRIAR}
+                  forceMount
+                  onSelect={() => {
+                    setAberto(false);
+                    criar.aoCriar();
+                  }}
+                  className={classeCriar}
+                >
+                  <Plus className="size-4 shrink-0" aria-hidden />
+                  {criar.rotulo ?? "Criar novo"}
+                </Command.Item>
+              ) : null}
             </Command.List>
           </Command>
         </PopoverContent>

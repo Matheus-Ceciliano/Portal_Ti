@@ -1,4 +1,3 @@
-import { ROTULO_CATEGORIA } from "@/lib/inventario";
 import type { FichaEquipamento } from "@/server/modulos/inventario";
 import { identificacao } from "../visual";
 import type { EquipamentoTransferencia } from "./dialogos-transferencia";
@@ -8,7 +7,7 @@ export function paraTransferencia(ficha: FichaEquipamento): EquipamentoTransfere
   return {
     id: ficha.id,
     rotulo: identificacao(ficha),
-    descricao: `${ROTULO_CATEGORIA[ficha.categoria]} · ${ficha.marca} ${ficha.modelo}`,
+    descricao: `${ficha.rotuloTipo} · ${ficha.marca} ${ficha.modelo}`,
     empresa: ficha.empresa,
     responsavel: ficha.responsavel
       ? { id: ficha.responsavel.id, nome: ficha.responsavel.nome, alocacao: ficha.responsavel.alocacao, alocacaoId: ficha.responsavel.alocacaoId }

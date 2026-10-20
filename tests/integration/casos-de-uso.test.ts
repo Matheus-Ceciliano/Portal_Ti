@@ -236,12 +236,12 @@ describe("isolamento de dados de colaboradores", () => {
     await semearInventarioTeste();
     const p = await criarPessoa({ id: PESSOAS[3].id, colaboradorExistente: true, ativada: true });
     const meus = await listarMeusEquipamentos(await ator(p.contaId));
-    expect(meus.map((m) => m.patrimonio ?? m.nome).sort()).toEqual(["NBI4512C1", "VLR-004512", "VLR-004513", "VLR-004530"]);
+    expect(meus.map((m) => m.patrimonio ?? m.nome).sort()).toEqual(["NBI4512.C1", "VLR-004512", "VLR-004513", "VLR-004530"]);
     expect(meus.every((m) => m.situacao === "ALOCADO")).toBe(true);
     await negado(listarInventario(await ator(p.contaId)));
 
     const s = await criarPessoa({ perfis: ["SUPERVISOR_TI"], ativada: true });
-    expect((await listarInventario(await ator(s.contaId))).totalGeral).toBe(18);
+    expect((await listarInventario(await ator(s.contaId))).totalGeral).toBe(27); // 18 equipamentos + 9 carregadores (registros próprios)
   });
 });
 

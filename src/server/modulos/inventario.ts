@@ -1,10 +1,8 @@
 import type { MotivoDesvinculoCarregador, Prisma } from "@/generated/prisma/client";
 import {
   CATEGORIAS,
-  CATEGORIAS_CADASTRO,
   CATEGORIAS_COMPONENTE,
   COM_CONFIGURACAO,
-  FORA_DE_EQUIPAMENTOS,
   FORMATO_IDENTIFICADOR,
   MOTIVOS_CARREGADOR,
   nomeCarregador,
@@ -17,7 +15,8 @@ import {
   type Categoria,
   type Situacao,
 } from "@/lib/inventario";
-import { descreverPeca, ehComponente, resumirConfiguracao, type EspecPeca, type TipoComponente } from "@/lib/componentes";
+import { configuracaoDoTexto, descreverPeca, ehComponente, pecasDaConfiguracao, resumirConfiguracao, type EspecPeca, type TipoComponente } from "@/lib/componentes";
+import { nomeParteKit, PARTES_KIT, ROTULO_PARTE, type Regra } from "@/lib/identificacao";
 import { obterArmazenamento } from "@/server/armazenamento";
 import { registrarAuditoria } from "@/server/auditoria";
 import type { Ator } from "@/server/authz/ator";
@@ -29,7 +28,6 @@ import {
   encerrarItem,
   gravarArquivosFotos,
   lerData,
-  marcaCanonica,
   mudarSituacao,
   prepararFotos,
   registrarMovimentacao,
@@ -40,7 +38,10 @@ import {
   UUID,
   type FotoEnviada,
 } from "./inventario-base";
-import { aplicarConfiguracaoOriginal, criarComponente, validarComponente, validarConfiguracao } from "./componentes";
+import { resolverFabricante, resolverProcessador, resolverSistema } from "./catalogos";
+import { categoriaDoTipo } from "./categorias";
+import { aplicarConfiguracaoOriginal, criarComponente, tecnologiasMemoria, validarComponente, validarConfiguracao } from "./componentes";
+import { gerarIdentificador } from "./identificacao-ativos";
 
 /**
  * Inventário (banco do portal): lista com indicadores, ficha do equipamento, cadastro com o
@@ -54,8 +55,11 @@ export type FiltroInventario = {
   grupo?: "equipamentos" | "componentes";
   busca?: string;
   empresaId?: string;
-  categoria?: Categoria;
+  /** Categoria do catálogo (o filtro "Tipo" da lista). */
+  categoriaId?: string;
+  /** Marca e modelo do catálogo (id). */
   marca?: string;
+  modelo?: string;
   situacao?: Situacao;
   /** Componentes: capacidade (GB) e notebook em que estão instalados. */
   capacidadeGb?: number;
@@ -70,13 +74,18 @@ export type FiltroInventario = {
  * Filtros da lista. A situação é aplicada à parte: os indicadores de situação não a usam
  * (escolher "Disponível" não zera os demais números).
  */
-/** Base de cada grupo: equipamentos (sem carregadores e componentes) ou componentes internos. */
+/**
+ * Base de cada grupo: equipamentos (tudo o que é físico, inclusive carregadores e peças de
+ * kit, cada um como registro próprio) ou componentes internos (RAM, SSD, HD).
+ */
 function baseGrupo(f: FiltroInventario): Prisma.AtivoWhereInput {
-  if (f.grupo === "componentes") {
-    return f.categoria && CATEGORIAS_COMPONENTE.includes(f.categoria) ? { categoria: f.categoria } : { categoria: { in: [...CATEGORIAS_COMPONENTE] } };
-  }
-  // Carregadores ficam na ficha do notebook; na lista, só com o filtro de tipo.
-  return f.categoria && !CATEGORIAS_COMPONENTE.includes(f.categoria) ? { categoria: f.categoria } : { categoria: { notIn: FORA_DE_EQUIPAMENTOS } };
+  const componentes = f.grupo === "componentes";
+  return {
+    AND: [
+      componentes ? { categoria: { in: [...CATEGORIAS_COMPONENTE] } } : { categoria: { notIn: [...CATEGORIAS_COMPONENTE] } },
+      f.categoriaId && UUID.test(f.categoriaId) ? { categoriaId: f.categoriaId } : {},
+    ],
+  };
 }
 
 function ondeInventario(f: FiltroInventario, comSituacao = true): Prisma.AtivoWhereInput {
@@ -87,7 +96,8 @@ function ondeInventario(f: FiltroInventario, comSituacao = true): Prisma.AtivoWh
     AND: [
       baseGrupo(f),
       f.empresaId && UUID.test(f.empresaId) ? { empresaId: f.empresaId } : {},
-      f.marca ? { marca: { equals: f.marca, mode: "insensitive" } } : {},
+      f.marca ? (UUID.test(f.marca) ? { marcaId: f.marca } : { marca: { equals: f.marca, mode: "insensitive" } }) : {},
+      f.modelo && UUID.test(f.modelo) ? { modeloId: f.modelo } : {},
       comSituacao && f.situacao ? { situacao: f.situacao } : {},
       componentes && f.capacidadeGb ? { capacidadeGb: f.capacidadeGb } : {},
       componentes && f.notebookId && UUID.test(f.notebookId) ? { instalacoes: { some: { vigente: true, equipamentoId: f.notebookId } } } : {},
@@ -99,7 +109,7 @@ function ondeInventario(f: FiltroInventario, comSituacao = true): Prisma.AtivoWh
 
 const ORDEM: Record<NonNullable<FiltroInventario["ordenar"]>, (d: "asc" | "desc") => Prisma.AtivoOrderByWithRelationInput[]> = {
   nome: (d) => [{ nomeDispositivo: { sort: d, nulls: "last" } }, { patrimonio: d }],
-  tipo: (d) => [{ categoria: d }, { nomeDispositivo: { sort: "asc", nulls: "last" } }, { patrimonio: "asc" }],
+  tipo: (d) => [{ categoriaEquipamento: { nome: d } }, { nomeDispositivo: { sort: "asc", nulls: "last" } }, { patrimonio: "asc" }],
   marca: (d) => [{ marca: d }, { modelo: d }],
   empresa: (d) => [{ empresa: { nome: d } }, { nomeDispositivo: { sort: "asc", nulls: "last" } }],
   situacao: (d) => [{ situacao: d }, { nomeDispositivo: { sort: "asc", nulls: "last" } }],
@@ -164,14 +174,21 @@ export async function listarInventario(ator: Ator, f: FiltroInventario = {}) {
 
     const grupo = baseGrupo({ grupo: f.grupo });
     const componentes = f.grupo === "componentes";
-    const [total, totalGeral, porSituacao, porTipo, porEmpresa, porMarca, marcas, capacidades, notebooks] = await Promise.all([
+    const marcaFiltro = f.marca && UUID.test(f.marca) ? f.marca : null;
+    const [total, totalGeral, porSituacao, porTipo, porEmpresa, porMarca, marcas, modelos, capacidades, notebooks] = await Promise.all([
       prisma.ativo.count({ where }),
       prisma.ativo.count({ where: baseGrupo(f) }),
       prisma.ativo.groupBy({ by: ["situacao"], where: escopoIndicadores, _count: { _all: true } }),
-      prisma.ativo.groupBy({ by: ["categoria"], where, _count: { _all: true }, orderBy: { _count: { categoria: "desc" } }, take: 6 }),
+      prisma.ativo.groupBy({ by: ["categoriaId"], where, _count: { _all: true }, orderBy: { _count: { categoriaId: "desc" } }, take: 6 }),
       prisma.ativo.groupBy({ by: ["empresaId"], where, _count: { _all: true } }),
       prisma.ativo.groupBy({ by: ["marca"], where, _count: { _all: true }, orderBy: { _count: { marca: "desc" } }, take: 6 }),
-      prisma.ativo.findMany({ where: grupo, distinct: ["marca"], orderBy: { marca: "asc" }, select: { marca: true } }),
+      // Opções dos filtros Marca e Modelo: itens do catálogo usados neste grupo (modelo pela marca escolhida).
+      prisma.marcaEquipamento.findMany({ where: { ativos: { some: grupo } }, orderBy: { nome: "asc" }, select: { id: true, nome: true } }),
+      prisma.modeloEquipamento.findMany({
+        where: { ativos: { some: grupo }, ...(marcaFiltro ? { marcaId: marcaFiltro } : {}) },
+        orderBy: { nome: "asc" },
+        select: { id: true, nome: true, marcaId: true },
+      }),
       // Opções dos filtros de componentes: capacidades cadastradas e notebooks com peças instaladas.
       componentes ? prisma.ativo.findMany({ where: grupo, distinct: ["capacidadeGb"], orderBy: { capacidadeGb: "asc" }, select: { capacidadeGb: true } }) : [],
       componentes
@@ -193,6 +210,8 @@ export async function listarInventario(ator: Ator, f: FiltroInventario = {}) {
         select: {
           id: true,
           categoria: true,
+          categoriaEquipamento: { select: { id: true, nome: true } },
+          parteKit: true,
           nomeDispositivo: true,
           patrimonio: true,
           marca: true,
@@ -203,18 +222,23 @@ export async function listarInventario(ator: Ator, f: FiltroInventario = {}) {
           interfaceConexao: true,
           formato: true,
           empresa: { select: { id: true, nome: true, sigla: true } },
-          fotos: { where: { contexto: "CADASTRO" }, orderBy: [{ tipo: "asc" }, { enviadaEm: "asc" }], take: 1, select: { id: true } },
+          fotos: { where: { contexto: "CADASTRO", removidaEm: null }, orderBy: [{ tipo: "asc" }, { enviadaEm: "asc" }], take: 1, select: { id: true } },
           instalacoes: { where: { vigente: true }, take: 1, select: { equipamento: { select: { id: true, nomeDispositivo: true } } } },
         },
       }),
       prisma.empresa.findMany({ where: { id: { in: porEmpresa.map((e) => e.empresaId) } }, select: { id: true, nome: true, sigla: true } }),
     ]);
+    const nomesCategorias = new Map(
+      (await prisma.categoriaEquipamento.findMany({ where: { id: { in: porTipo.map((t) => t.categoriaId) } }, select: { id: true, nome: true } })).map((c) => [c.id, c.nome]),
+    );
     const contar = (s: Situacao) => porSituacao.find((p) => p.situacao === s)?._count._all ?? 0;
 
     return {
       linhas: linhas.map((a) => ({
         id: a.id,
         categoria: a.categoria,
+        /** Nome da categoria no catálogo; peça de kit: "Kit teclado e mouse · Teclado". */
+        tipo: a.parteKit ? `${a.categoriaEquipamento.nome} · ${ROTULO_PARTE[a.parteKit]}` : a.categoriaEquipamento.nome,
         nome: a.nomeDispositivo,
         /** Não é exibido na tabela: identifica o item sem nome de dispositivo e serve à pesquisa. */
         patrimonio: a.patrimonio,
@@ -232,7 +256,8 @@ export async function listarInventario(ator: Ator, f: FiltroInventario = {}) {
       totalGeral,
       pagina,
       paginas,
-      marcas: marcas.map((m) => m.marca),
+      marcas,
+      modelos,
       capacidades: capacidades.map((c) => c.capacidadeGb).filter((c): c is number => c !== null),
       notebooks: notebooks.map((n) => ({ id: n.id, nome: n.nomeDispositivo ?? "Notebook" })),
       indicadores: {
@@ -247,7 +272,7 @@ export async function listarInventario(ator: Ator, f: FiltroInventario = {}) {
         porEmpresa: porEmpresa
           .map((e) => ({ ...empresas.find((x) => x.id === e.empresaId)!, total: e._count._all }))
           .sort((a, b) => b.total - a.total || a.nome.localeCompare(b.nome, "pt-BR")),
-        porTipo: porTipo.map((t) => ({ categoria: t.categoria, total: t._count._all })),
+        porTipo: porTipo.map((t) => ({ categoriaId: t.categoriaId, nome: nomesCategorias.get(t.categoriaId) ?? "Categoria", total: t._count._all })),
         porMarca: porMarca.map((m) => ({ marca: m.marca, total: m._count._all })),
       },
     };
@@ -277,12 +302,15 @@ export async function obterEquipamento(ator: Ator, id: string) {
           where: { id },
           include: {
             empresa: { select: { id: true, nome: true, sigla: true } },
+            categoriaEquipamento: { select: { id: true, nome: true, regra: true, prefixo: true } },
+            processadorCatalogo: { select: { modelo: true, codigoNomenclatura: true } },
+            kit: { select: { id: true, codigo: true, partes: { orderBy: { nomeDispositivo: "asc" }, select: { id: true, nomeDispositivo: true, parteKit: true, situacao: true } } } },
             notebook: { select: { id: true, nomeDispositivo: true, patrimonio: true, modelo: true } },
             carregadores: {
               orderBy: { sequenciaCarregador: "asc" },
               select: { id: true, nomeDispositivo: true, patrimonio: true, sequenciaCarregador: true, situacao: true, desvinculadoEm: true, motivoDesvinculo: true, marca: true, modelo: true },
             },
-            fotos: { orderBy: [{ enviadaEm: "asc" }, { tipo: "asc" }], select: { id: true, tipo: true, contexto: true, enviadaEm: true, enviadaPorNome: true, manutencaoId: true } },
+            fotos: { where: { removidaEm: null }, orderBy: [{ enviadaEm: "asc" }, { tipo: "asc" }], select: { id: true, tipo: true, contexto: true, enviadaEm: true, enviadaPorNome: true, manutencaoId: true } },
             movimentacoes: { orderBy: { realizadoEm: "desc" }, take: 60 },
             itensAlocacao: SELECAO_ALOCACAO_ABERTA,
             manutencoes: { orderBy: { abertaEm: "desc" } },
@@ -299,6 +327,7 @@ export async function obterEquipamento(ator: Ator, id: string) {
       : null;
     if (!a) throw new ErroNegocio("Equipamento não encontrado.");
     const pendente = a.transferencias[0] ?? null;
+    const originais = a.categoria === "NOTEBOOK" ? await prisma.pecaConfiguracao.count({ where: { equipamentoId: a.id, original: true } }) : 0;
     const { responsavel, reserva, ter } = custodia(a.itensAlocacao);
     // Escopo próprio: só o equipamento entregue à própria pessoa.
     if (escopo !== "GRUPO" && responsavel?.id !== ator.colaboradorId) throw new ErroAutorizacao("ativo.ver", "ESCOPO_PROPRIO");
@@ -307,13 +336,29 @@ export async function obterEquipamento(ator: Ator, id: string) {
     return {
       id: a.id,
       categoria: a.categoria,
+      /** Categoria do catálogo (nome exibido e regra do identificador). */
+      categoriaCatalogo: { id: a.categoriaEquipamento.id, nome: a.categoriaEquipamento.nome, regra: a.categoriaEquipamento.regra as Regra },
+      rotuloTipo: a.parteKit ? `${a.categoriaEquipamento.nome} · ${ROTULO_PARTE[a.parteKit]}` : a.categoriaEquipamento.nome,
+      /** Código de nomenclatura do processador (NBI5…); só informativo depois do cadastro. */
+      codigoProcessador: a.processadorCatalogo?.codigoNomenclatura ?? null,
+      /** Peça de kit: o código do kit e as peças irmãs. */
+      kit: a.kit && {
+        codigo: a.kit.codigo,
+        parte: a.parteKit!,
+        partes: a.kit.partes.map((x) => ({ id: x.id, nome: x.nomeDispositivo!, parte: x.parteKit!, situacao: x.situacao })),
+      },
       nome: a.nomeDispositivo,
       patrimonio: a.patrimonio,
       empresa: a.empresa,
       marca: a.marca,
       modelo: a.modelo,
+      /** Referências do catálogo (o formulário de edição parte delas). */
+      marcaId: a.marcaId,
+      modeloId: a.modeloId,
+      processadorId: a.processadorId,
+      sistemaOperacionalId: a.sistemaOperacionalId,
       numeroSerie: a.numeroSerie,
-      processador: a.processador,
+      processador: a.processador ?? a.processadorCatalogo?.modelo ?? null,
       memoriaRam: a.memoriaRam,
       armazenamento: a.armazenamento,
       sistemaOperacional: a.sistemaOperacional,
@@ -357,7 +402,11 @@ export async function obterEquipamento(ator: Ator, id: string) {
       componentesInternos:
         a.categoria === "NOTEBOOK"
           ? {
-              resumo: resumirConfiguracao(a.pecasConfiguracao.map(especPeca)),
+              // Notebook antigo: a ficha escrita conta como configuração original na soma.
+              resumo: resumirConfiguracao([
+                ...(originais === 0 ? pecasDaConfiguracao(configuracaoDoTexto(a.memoriaRam, a.armazenamento) ?? { memoria: null, armazenamento: [] }) : []),
+                ...a.pecasConfiguracao.map(especPeca),
+              ]),
               /** Sem peças nem intervenções: só o texto antigo da ficha (ou nada). */
               estruturada: a.pecasConfiguracao.length > 0 || a.intervencoes.length > 0,
               /** A configuração original só é corrigida antes de qualquer instalação, remoção ou substituição. */
@@ -444,28 +493,35 @@ export type FichaEquipamento = Awaited<ReturnType<typeof obterEquipamento>>;
 /* Cadastro e edição */
 
 export type DadosEquipamento = {
-  categoria: string;
+  /** Categoria do catálogo. Sem ela, `categoria` (o tipo) usa a categoria padrão do tipo. */
+  categoriaId?: string | null;
+  categoria?: string;
+  /** Só nas categorias sem identificação automática; nas demais o portal gera o nome. */
   nomeDispositivo?: string | null;
   patrimonio?: string | null;
   empresaId: string;
-  marca: string;
-  modelo: string;
+  /** Catálogos: marca, modelo (da marca e da categoria), processador e sistema operacional. */
+  marcaId?: string | null;
+  modeloId?: string | null;
+  /** Notebook: o código de nomenclatura do processador define o identificador (i5 → NBI5001). */
+  processadorId?: string | null;
+  sistemaOperacionalId?: string | null;
   numeroSerie?: string | null;
-  processador?: string | null;
   memoriaRam?: string | null;
   armazenamento?: string | null;
-  sistemaOperacional?: string | null;
   dataAquisicao?: string | null;
   garantiaAte?: string | null;
   observacoes?: string | null;
   /** Notebook: configuração original estruturada (só especificação; nenhuma peça física é criada). */
   configuracao?: unknown;
-  /** Componente (RAM, SSD, HD): a identificação (RAM001...) é automática. */
+  /** Componente (RAM, SSD, HD). */
   capacidadeGb?: number | string | null;
   tecnologia?: string | null;
   interfaceConexao?: string | null;
   formato?: string | null;
   frequenciaMhz?: number | string | null;
+  /** Kit: peças que acompanham (teclado, mouse, hub/receptor) e o número de série de cada uma. */
+  partesKit?: { parte: string; numeroSerie?: string | null }[] | null;
 };
 
 const textoLivre = (v: string | null | undefined, max: number, rotulo: string) => {
@@ -484,25 +540,61 @@ function identificador(v: string | null | undefined, rotulo: string, obrigatorio
   return t;
 }
 
-async function validarDados(db: ClienteBanco, d: DadosEquipamento, categoria: Categoria) {
+/** Categoria escolhida no cadastro ou a padrão do tipo informado. */
+async function resolverCategoria(db: ClienteBanco, d: DadosEquipamento) {
+  const c =
+    d.categoriaId && UUID.test(d.categoriaId)
+      ? await db.categoriaEquipamento.findUnique({ where: { id: d.categoriaId } })
+      : d.categoria
+        ? await db.categoriaEquipamento.findUnique({ where: { codigo: d.categoria } })
+        : null;
+  if (!c) throw new ErroNegocio("Selecione a categoria.");
+  return { ...c, tipo: c.tipo as Categoria, regra: c.regra as Regra };
+}
+
+/** Peças do kit: ao menos uma, sem repetir; cada uma com o próprio número de série (opcional). */
+function lerPartesKit(partes: DadosEquipamento["partesKit"]) {
+  const lista = (partes ?? []).map((p) => {
+    const parte = PARTES_KIT.find((x) => x === p.parte);
+    if (!parte) throw new ErroNegocio("Peça do kit inválida.");
+    return { parte, numeroSerie: identificador(p.numeroSerie, `o número de série do ${ROTULO_PARTE[parte].toLowerCase()}`, false) };
+  });
+  if (!lista.length) throw new ErroNegocio("Selecione ao menos uma peça do kit.");
+  if (new Set(lista.map((p) => p.parte)).size !== lista.length) throw new ErroNegocio("Peça do kit repetida.");
+  const series = lista.map((p) => p.numeroSerie).filter(Boolean);
+  if (new Set(series).size !== series.length) throw new ErroNegocio("Número de série repetido entre as peças do kit.");
+  return lista.sort((a, b) => PARTES_KIT.indexOf(a.parte) - PARTES_KIT.indexOf(b.parte));
+}
+
+type AtualCatalogo = { marcaId: string | null; modeloId: string | null; processadorId: string | null; sistemaOperacionalId: string | null } | null;
+
+/**
+ * Dados comuns do cadastro e da edição. Marca, modelo, processador e sistema vêm dos
+ * catálogos (o texto gravado acompanha o item); itens inativos só valem para quem já os usa.
+ */
+async function validarDados(db: ClienteBanco, d: DadosEquipamento, cat: { id: string; tipo: Categoria }, atual: AtualCatalogo = null) {
+  const categoria = cat.tipo;
   const empresa = UUID.test(d.empresaId) ? await db.empresa.findUnique({ where: { id: d.empresaId }, select: { id: true, ativa: true, nome: true } }) : null;
   if (!empresa) throw new ErroNegocio("Selecione a empresa proprietária.");
-  const marca = textoLivre(d.marca, 60, "Marca");
-  const modelo = textoLivre(d.modelo, 80, "Modelo");
-  if (!marca) throw new ErroNegocio("Informe a marca.");
-  if (!modelo) throw new ErroNegocio("Informe o modelo.");
+  // O carregador nasce com o modelo "Carregador": o modelo do catálogo é opcional para ele.
+  const fabricante = await resolverFabricante(db, d, cat.id, { modeloOpcional: categoria === "CARREGADOR", atual });
   const dataAquisicao = lerData(d.dataAquisicao, "Data de aquisição");
   const garantiaAte = lerData(d.garantiaAte, "Garantia");
   if (dataAquisicao && dataAquisicao.getTime() > Date.now()) throw new ErroNegocio("Data de aquisição: não pode estar no futuro.");
   if (dataAquisicao && garantiaAte && garantiaAte < dataAquisicao) throw new ErroNegocio("Garantia: a data final é anterior à aquisição.");
   const configuracao = COM_CONFIGURACAO.includes(categoria);
+  const processador = configuracao ? await resolverProcessador(db, d.processadorId, atual) : null;
+  const sistema = configuracao ? await resolverSistema(db, d.sistemaOperacionalId, cat.id, atual) : null;
   return {
     empresa,
+    fabricante,
+    processador,
     dados: {
-      marca: await marcaCanonica(db, marca),
-      modelo,
+      marcaId: fabricante.marcaId,
+      marca: fabricante.marca,
       numeroSerie: identificador(d.numeroSerie, "número de série", false),
-      processador: configuracao ? textoLivre(d.processador, 80, "Processador") : null,
+      processadorId: processador?.id ?? null,
+      processador: processador?.modelo ?? null,
       // Notebook: memória e armazenamento refletem as peças da configuração (nunca texto solto).
       ...(categoria === "NOTEBOOK"
         ? {}
@@ -510,7 +602,8 @@ async function validarDados(db: ClienteBanco, d: DadosEquipamento, categoria: Ca
             memoriaRam: configuracao ? textoLivre(d.memoriaRam, 40, "Memória RAM") : null,
             armazenamento: configuracao ? textoLivre(d.armazenamento, 60, "Armazenamento") : null,
           }),
-      sistemaOperacional: configuracao ? textoLivre(d.sistemaOperacional, 60, "Sistema operacional") : null,
+      sistemaOperacionalId: sistema?.id ?? null,
+      sistemaOperacional: sistema?.rotulo ?? null,
       dataAquisicao,
       garantiaAte,
       observacoes: textoLivre(d.observacoes, 1000, "Observações"),
@@ -529,18 +622,21 @@ function semCategoria<T extends { categoria: string }>(d: T): Omit<T, "categoria
 async function criarCarregador(
   tx: Transacao,
   ator: Ator,
-  notebook: { id: string; nomeDispositivo: string | null; empresaId: string; marca: string },
+  notebook: { id: string; nomeDispositivo: string | null; empresaId: string; marca: string; marcaId: string | null },
   observacao: string,
 ) {
-  if (!notebook.nomeDispositivo) throw new ErroNegocio("Informe o nome do dispositivo do notebook antes de vincular carregadores.");
+  if (!notebook.nomeDispositivo) throw new ErroNegocio("O notebook não tem identificador para nomear os carregadores.");
   const usadas = await tx.ativo.findMany({ where: { notebookId: notebook.id }, select: { sequenciaCarregador: true } });
   const sequencia = proximaSequencia(usadas.map((u) => u.sequenciaCarregador!));
+  const categoria = await categoriaDoTipo(tx, "CARREGADOR");
   const carregador = await tx.ativo.create({
     data: {
       categoria: "CARREGADOR",
+      categoriaId: categoria.id,
       nomeDispositivo: nomeCarregador(notebook.nomeDispositivo, sequencia),
       empresaId: notebook.empresaId,
       marca: notebook.marca,
+      marcaId: notebook.marcaId,
       modelo: "Carregador",
       notebookId: notebook.id,
       sequenciaCarregador: sequencia,
@@ -552,46 +648,109 @@ async function criarCarregador(
   return carregador;
 }
 
+/** Cadastro já feito com a mesma chave: o equipamento ou a primeira peça do kit. */
+async function cadastroRepetido(chave: string | null) {
+  if (!chave) return null;
+  const ativo = await prisma.ativo.findUnique({ where: { chaveRequisicao: chave }, select: { id: true, nomeDispositivo: true } });
+  if (ativo) return { id: ativo.id, nome: ativo.nomeDispositivo, carregador: null, pecas: [] as string[], repetido: true };
+  const kit = await prisma.kitEquipamento.findUnique({ where: { chaveRequisicao: chave }, select: { codigo: true, partes: { orderBy: { nomeDispositivo: "asc" }, take: 1, select: { id: true } } } });
+  return kit?.partes[0] ? { id: kit.partes[0].id, nome: kit.codigo as string | null, carregador: null, pecas: [] as string[], repetido: true } : null;
+}
+
 /**
- * Cadastro atômico: equipamento, carregador principal (notebook → <nome>C1), fotos e
- * histórico na mesma transação. O mesmo envio repetido devolve o cadastro já feito.
+ * Cadastro atômico, com o identificador gerado no banco pela regra da categoria: notebook
+ * (NBI + família + sequência) com o carregador C1; kit (KTM01) com uma peça por item
+ * marcado; peças internas e demais categorias com a sequência da abreviação. Fotos e
+ * histórico na mesma transação; o mesmo envio repetido devolve o cadastro já feito.
  */
-export async function cadastrarEquipamento(ator: Ator, entrada: { dados: DadosEquipamento; fotos?: FotoEnviada[]; chaveRequisicao?: string }) {
+export async function cadastrarEquipamento(
+  ator: Ator,
+  entrada: { dados: DadosEquipamento; fotos?: FotoEnviada[]; fotosPartes?: Partial<Record<string, FotoEnviada[]>>; chaveRequisicao?: string },
+) {
   return executarCasoDeUso(ator, async () => {
     const { origem } = exigirPermissao(ator, "ativo.criar");
-    if (entrada.fotos?.some((f) => f.dados.length)) exigirPermissao(ator, "evidencia.enviar");
+    const fotosPartesEnviadas = Object.values(entrada.fotosPartes ?? {}).flat().filter((f): f is FotoEnviada => Boolean(f));
+    if ([...(entrada.fotos ?? []), ...fotosPartesEnviadas].some((f) => f.dados.length)) exigirPermissao(ator, "evidencia.enviar");
     const chave = entrada.chaveRequisicao && UUID.test(entrada.chaveRequisicao) ? entrada.chaveRequisicao : null;
-    if (chave) {
-      const ja = await prisma.ativo.findUnique({ where: { chaveRequisicao: chave }, select: { id: true } });
-      if (ja) return { id: ja.id, repetido: true };
-    }
+    const ja = await cadastroRepetido(chave);
+    if (ja) return ja;
 
-    const categoria = CATEGORIAS_CADASTRO.find((c) => c === entrada.dados.categoria);
-    if (!categoria) throw new ErroNegocio("Selecione a categoria.");
-    // Componente (RAM, SSD, HD): identificação automática (RAM001...), sem patrimônio.
-    const componente = ehComponente(categoria);
-    const nomeDispositivo = componente ? null : identificador(entrada.dados.nomeDispositivo, "o nome do dispositivo", categoria === "NOTEBOOK");
-    const patrimonio = componente ? null : identificador(entrada.dados.patrimonio, "o patrimônio", true);
-    const { empresa, dados } = await validarDados(prisma, entrada.dados, categoria);
+    const cat = await resolverCategoria(prisma, entrada.dados);
+    if (!cat.ativa) throw new ErroNegocio(`A categoria ${cat.nome} está inativa.`);
+    if (cat.regra === "CARREGADOR") throw new ErroNegocio("Carregadores nascem com o notebook (C1) ou na ficha do notebook.");
+    const tipo = cat.tipo;
+    const { empresa, dados, fabricante, processador } = await validarDados(prisma, entrada.dados, cat);
     if (!empresa.ativa) throw new ErroNegocio("A empresa proprietária está inativa.");
-    const especificacao = componente ? await validarComponente(prisma, { ...entrada.dados, categoria, capacidadeGb: entrada.dados.capacidadeGb ?? "" }) : null;
-    const configuracao = categoria === "NOTEBOOK" ? validarConfiguracao(entrada.dados.configuracao) : null;
-    const fotos = prepararFotos(entrada.fotos ?? []);
-    await gravarArquivosFotos(fotos);
+    const automatico = cat.regra !== "NENHUMA";
+    const nomeManual = automatico ? null : identificador(entrada.dados.nomeDispositivo, "o nome do dispositivo", false);
+    const patrimonio = identificador(entrada.dados.patrimonio, "o patrimônio", false);
+    if (!automatico && !nomeManual && !patrimonio) throw new ErroNegocio("Informe o patrimônio ou o nome do dispositivo.");
+    // Notebook: o código de nomenclatura do processador entra no identificador (i5 → NBI5001).
+    if (cat.regra === "PROCESSADOR") {
+      if (!processador) throw new ErroNegocio("Selecione o modelo do processador.");
+      if (!processador.codigo) throw new ErroNegocio(`O processador ${processador.modelo} não tem código de nomenclatura: configure-o em Catálogos do Inventário.`);
+    }
+    const especificacao = ehComponente(tipo) ? await validarComponente(prisma, { ...entrada.dados, categoria: tipo, capacidadeGb: entrada.dados.capacidadeGb ?? "" }) : null;
+    const configuracao = tipo === "NOTEBOOK" ? validarConfiguracao(entrada.dados.configuracao, await tecnologiasMemoria(prisma)) : null;
+    const modelo = { modeloId: fabricante.modeloId, modelo: fabricante.modelo! };
+    const partes = cat.regra === "KIT" ? lerPartesKit(entrada.dados.partesKit) : [];
+    const fotos = prepararFotos(cat.regra === "KIT" ? [] : (entrada.fotos ?? []));
+    const fotosPartes = new Map(partes.map((p) => [p.parte, prepararFotos(entrada.fotosPartes?.[p.parte] ?? [])]));
+    const todas = [...fotos, ...[...fotosPartes.values()].flat()];
+    await gravarArquivosFotos(todas);
 
     try {
-      const id = await prisma.$transaction(async (tx) => {
+      const resultado = await prisma.$transaction(async (tx) => {
+        if (cat.regra === "KIT") {
+          // O kit é o agrupador lógico; cada peça marcada vira um equipamento próprio.
+          const codigo = await gerarIdentificador(tx, cat);
+          const kit = await tx.kitEquipamento.create({ data: { codigo, categoriaId: cat.id, criadoPorNome: ator.nome, chaveRequisicao: chave } });
+          const criadas: { id: string; nome: string }[] = [];
+          for (const p of partes) {
+            const nome = nomeParteKit(codigo, p.parte);
+            const parte = await tx.ativo.create({
+              data: { categoria: tipo, categoriaId: cat.id, kitId: kit.id, parteKit: p.parte, nomeDispositivo: nome, patrimonio: null, empresaId: empresa.id, ...dados, ...modelo, numeroSerie: p.numeroSerie, criadoPorNome: ator.nome },
+            });
+            await registrarMovimentacao(tx, ator, parte.id, { tipo: "CADASTRO", situacaoNova: "DISPONIVEL", observacao: `Kit ${codigo}: ${ROTULO_PARTE[p.parte].toLowerCase()}. Empresa proprietária: ${empresa.nome}.` });
+            const fotosDaParte = fotosPartes.get(p.parte) ?? [];
+            if (fotosDaParte.length) await tx.fotoAtivo.createMany({ data: fotosDaParte.map((f) => ({ ...dadosFoto(f, parte.id, ator), contexto: "CADASTRO" as const })) });
+            criadas.push({ id: parte.id, nome });
+          }
+          await registrarAuditoria(tx, {
+            acao: "ativo.criar",
+            resultado: "SUCESSO",
+            ator: { contaId: ator.contaId, nome: ator.nome },
+            alvo: { tipo: "kit_equipamento", id: kit.id, descricao: codigo },
+            origemPermissao: origem,
+            detalhe: { categoria: cat.nome, kit: codigo, pecas: criadas.map((c) => c.nome), empresa: empresa.nome, fotos: todas.length },
+          });
+          return { id: criadas[0].id, nome: codigo, carregador: null, pecas: criadas.map((c) => c.nome) };
+        }
+
         let ativo;
         if (especificacao) {
-          ativo = await criarComponente(tx, ator, especificacao, empresa.id, `Empresa proprietária: ${empresa.nome}.`, { chaveRequisicao: chave });
+          ativo = await criarComponente(tx, ator, especificacao, empresa.id, `Empresa proprietária: ${empresa.nome}.`, { chaveRequisicao: chave, patrimonio });
         } else {
+          const nomeDispositivo = automatico ? await gerarIdentificador(tx, { ...cat, codigoProcessador: processador?.codigo }) : nomeManual;
           ativo = await tx.ativo.create({
-            data: { categoria, nomeDispositivo, patrimonio, empresaId: empresa.id, ...dados, chaveRequisicao: chave, criadoPorNome: ator.nome },
+            data: {
+              categoria: tipo,
+              categoriaId: cat.id,
+              nomeDispositivo,
+              patrimonio,
+              empresaId: empresa.id,
+              ...dados,
+              ...modelo,
+              chaveRequisicao: chave,
+              criadoPorNome: ator.nome,
+            },
           });
           await registrarMovimentacao(tx, ator, ativo.id, { tipo: "CADASTRO", situacaoNova: "DISPONIVEL", observacao: `Empresa proprietária: ${empresa.nome}.` });
         }
-        if (categoria === "NOTEBOOK") {
-          await criarCarregador(tx, ator, ativo, "Carregador principal criado com o notebook");
+        let carregador: string | null = null;
+        if (tipo === "NOTEBOOK") {
+          // Notebook e carregador principal (C1) na mesma transação.
+          carregador = (await criarCarregador(tx, ator, ativo, "Carregador principal criado com o notebook")).nomeDispositivo;
           // Só a especificação: nenhuma peça física (RAM001, SSD001...) nasce do cadastro.
           if (configuracao) await aplicarConfiguracaoOriginal(tx, ator, ativo, configuracao);
         }
@@ -602,49 +761,49 @@ export async function cadastrarEquipamento(ator: Ator, entrada: { dados: DadosEq
           ator: { contaId: ator.contaId, nome: ator.nome },
           alvo: { tipo: "ativo", id: ativo.id, descricao: rotuloAtivo(ativo) },
           origemPermissao: origem,
-          detalhe: { categoria, empresa: empresa.nome, fotos: fotos.length, carregadorPrincipal: categoria === "NOTEBOOK", configuracaoOriginal: Boolean(configuracao) },
+          detalhe: { categoria: cat.nome, identificador: ativo.nomeDispositivo, empresa: empresa.nome, fotos: fotos.length, carregadorPrincipal: tipo === "NOTEBOOK", configuracaoOriginal: Boolean(configuracao) },
         });
-        return ativo.id;
+        return { id: ativo.id, nome: ativo.nomeDispositivo, carregador, pecas: [] as string[] };
       });
-      return { id, repetido: false };
+      return { ...resultado, repetido: false };
     } catch (erro) {
-      await descartarFotos(fotos.map((f) => f.chave));
+      await descartarFotos(todas.map((f) => f.chave));
       // Envio repetido em paralelo: o outro já gravou (o conflito pode surgir em qualquer campo único).
-      if (chave) {
-        const ja = await prisma.ativo.findUnique({ where: { chaveRequisicao: chave }, select: { id: true } });
-        if (ja) return { id: ja.id, repetido: true };
-      }
+      const repetido = await cadastroRepetido(chave);
+      if (repetido) return repetido;
       throw traduzirConflito(erro);
     }
   });
 }
 
 /**
- * Edição dos dados cadastrais. Categoria, situação, empresa proprietária, responsável e
- * alocações não mudam aqui: a empresa e o colaborador só mudam pelas transferências, com
- * histórico e auditoria. Renomear o notebook renomeia os carregadores vinculados.
+ * Edição dos dados cadastrais. Categoria, identificador gerado, situação, empresa
+ * proprietária, responsável e alocações não mudam aqui: a empresa e o colaborador só mudam
+ * pelas transferências, com histórico e auditoria.
  */
-export async function editarEquipamento(ator: Ator, entrada: { id: string; dados: DadosEquipamento; fotos?: FotoEnviada[] }) {
+export async function editarEquipamento(ator: Ator, entrada: { id: string; dados: DadosEquipamento; fotos?: FotoEnviada[]; removerFotos?: string[] }) {
   return executarCasoDeUso(ator, async () => {
     const { origem } = exigirPermissao(ator, "ativo.editar");
-    if (entrada.fotos?.some((f) => f.dados.length)) exigirPermissao(ator, "evidencia.enviar");
-    const atual = UUID.test(entrada.id) ? await prisma.ativo.findUnique({ where: { id: entrada.id } }) : null;
+    const removerFotos = [...new Set(entrada.removerFotos ?? [])];
+    // Incluir ou retirar fotos é tratar evidência: mesma permissão nos dois sentidos.
+    if (entrada.fotos?.some((f) => f.dados.length) || removerFotos.length) exigirPermissao(ator, "evidencia.enviar");
+    if (removerFotos.some((f) => !UUID.test(f))) throw new ErroNegocio("Foto não encontrada.");
+    const atual = UUID.test(entrada.id) ? await prisma.ativo.findUnique({ where: { id: entrada.id }, include: { categoriaEquipamento: { select: { regra: true } } } }) : null;
     if (!atual) throw new ErroNegocio("Equipamento não encontrado.");
     if (entrada.dados.empresaId && entrada.dados.empresaId !== atual.empresaId) {
       throw new ErroNegocio("A empresa proprietária só muda pela transferência entre empresas, na ficha do equipamento.");
     }
-    const carregador = atual.categoria === "CARREGADOR";
     const componente = ehComponente(atual.categoria);
-    const nomeDispositivo =
-      carregador || componente ? atual.nomeDispositivo : identificador(entrada.dados.nomeDispositivo, "o nome do dispositivo", atual.categoria === "NOTEBOOK");
-    const patrimonio = componente
-      ? atual.patrimonio
-      : carregador
-        ? identificador(entrada.dados.patrimonio, "o patrimônio", false)
-        : identificador(entrada.dados.patrimonio, "o patrimônio", true);
-    const { dados } = await validarDados(prisma, { ...entrada.dados, empresaId: atual.empresaId }, atual.categoria);
+    // Identificador gerado (ou de carregador/peça de kit) não se edita; só categorias sem regra aceitam nome informado.
+    const nomeLivre = atual.categoriaEquipamento.regra === "NENHUMA" && !atual.kitId;
+    const nomeDispositivo = nomeLivre ? identificador(entrada.dados.nomeDispositivo, "o nome do dispositivo", false) : atual.nomeDispositivo;
+    const patrimonio = componente ? atual.patrimonio : identificador(entrada.dados.patrimonio, "o patrimônio", false);
+    if (!nomeDispositivo && !patrimonio && atual.categoria !== "CARREGADOR") throw new ErroNegocio("Informe o patrimônio ou o nome do dispositivo.");
+    const { dados, fabricante, processador } = await validarDados(prisma, { ...entrada.dados, empresaId: atual.empresaId }, { id: atual.categoriaId, tipo: atual.categoria as Categoria }, atual);
+    // Notebook com processador escolhido continua com um (o identificador não muda).
+    if (atual.categoria === "NOTEBOOK" && atual.processadorId && !processador) throw new ErroNegocio("Selecione o modelo do processador.");
     const especificacao = componente
-      ? await validarComponente(prisma, { ...entrada.dados, categoria: atual.categoria, capacidadeGb: entrada.dados.capacidadeGb ?? "" })
+      ? await validarComponente(prisma, { ...entrada.dados, categoria: atual.categoria, capacidadeGb: entrada.dados.capacidadeGb ?? "" }, atual)
       : null;
     // Peça instalada: a especificação fica igual à registrada no notebook até a remoção.
     if (
@@ -654,14 +813,17 @@ export async function editarEquipamento(ator: Ator, entrada: { id: string; dados
     ) {
       throw new ErroNegocio("Componente instalado: remova-o do notebook para corrigir a especificação.");
     }
-    const configuracao = atual.categoria === "NOTEBOOK" ? validarConfiguracao(entrada.dados.configuracao) : null;
+    // Trocar o processador é dado técnico: o notebook não é renomeado.
+    const configuracao = atual.categoria === "NOTEBOOK" ? validarConfiguracao(entrada.dados.configuracao, await tecnologiasMemoria(prisma)) : null;
     const fotos = prepararFotos(entrada.fotos ?? []);
     await gravarArquivosFotos(fotos);
 
     try {
       await prisma.$transaction(async (tx) => {
         await travarAtivos(tx, [atual.id]);
-        const novo = especificacao ? semCategoria(especificacao.dados) : { nomeDispositivo, patrimonio, ...dados };
+        const novo = especificacao
+          ? semCategoria(especificacao.dados)
+          : { nomeDispositivo, patrimonio, ...dados, ...(fabricante.modeloId ? { modeloId: fabricante.modeloId, modelo: fabricante.modelo! } : {}) };
         const antes: Record<string, unknown> = atual;
         const alterados = Object.entries(novo)
           .filter(([k, v]) => String(antes[k] instanceof Date ? (antes[k] as Date).toISOString() : (antes[k] ?? "")) !== String(v instanceof Date ? v.toISOString() : (v ?? "")))
@@ -669,18 +831,20 @@ export async function editarEquipamento(ator: Ator, entrada: { id: string; dados
         await tx.ativo.update({ where: { id: atual.id }, data: novo });
         // Configuração original: só antes de qualquer intervenção nos componentes (o caso de uso confere).
         if (configuracao) await aplicarConfiguracaoOriginal(tx, ator, atual, configuracao);
-
-        const vinculados = atual.categoria === "NOTEBOOK" ? await tx.ativo.findMany({ where: { notebookId: atual.id, desvinculadoEm: null } }) : [];
-        if (nomeDispositivo && nomeDispositivo !== atual.nomeDispositivo) {
-          for (const c of vinculados) {
-            await tx.ativo.update({ where: { id: c.id }, data: { nomeDispositivo: nomeCarregador(nomeDispositivo, c.sequenciaCarregador!) } });
-          }
-        }
-        if (alterados.length || fotos.length) {
-          await registrarMovimentacao(tx, ator, atual.id, {
-            tipo: "EDICAO",
-            observacao: fotos.length ? `${fotos.length} ${fotos.length === 1 ? "foto incluída" : "fotos incluídas"}.` : null,
+        // Só fotos do cadastro saem (as de manutenção e devolução são registro do evento); o arquivo fica.
+        if (removerFotos.length) {
+          const r = await tx.fotoAtivo.updateMany({
+            where: { id: { in: removerFotos }, ativoId: atual.id, contexto: "CADASTRO", removidaEm: null },
+            data: { removidaEm: new Date(), removidaPorNome: ator.nome },
           });
+          if (r.count !== removerFotos.length) throw new ErroNegocio("Uma das fotos já foi removida ou não é do cadastro. Atualize a página.");
+        }
+        if (alterados.length || fotos.length || removerFotos.length) {
+          const fotosTexto = [
+            fotos.length ? `${fotos.length} ${fotos.length === 1 ? "foto incluída" : "fotos incluídas"}` : null,
+            removerFotos.length ? `${removerFotos.length} ${removerFotos.length === 1 ? "foto removida" : "fotos removidas"}` : null,
+          ].filter(Boolean);
+          await registrarMovimentacao(tx, ator, atual.id, { tipo: "EDICAO", observacao: fotosTexto.length ? `${fotosTexto.join("; ")}.` : null });
         }
         if (fotos.length) await tx.fotoAtivo.createMany({ data: fotos.map((f) => ({ ...dadosFoto(f, atual.id, ator), contexto: "CADASTRO" as const })) });
         await registrarAuditoria(tx, {
@@ -689,7 +853,7 @@ export async function editarEquipamento(ator: Ator, entrada: { id: string; dados
           ator: { contaId: ator.contaId, nome: ator.nome },
           alvo: { tipo: "ativo", id: atual.id, descricao: rotuloAtivo({ ...atual, nomeDispositivo, patrimonio }) },
           origemPermissao: origem,
-          detalhe: { campos: alterados, fotosIncluidas: fotos.length },
+          detalhe: { campos: alterados, fotosIncluidas: fotos.length, fotosRemovidas: removerFotos.length },
         });
       });
       return { id: atual.id };

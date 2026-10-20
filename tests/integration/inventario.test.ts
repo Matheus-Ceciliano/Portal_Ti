@@ -23,6 +23,7 @@ import {
 } from "@/server/modulos/inventario";
 import { concluirManutencao, enviarParaManutencao, listarManutencoes } from "@/server/modulos/manutencoes";
 import { lerPdfTermo, registrarTerAssinado } from "@/server/modulos/termos";
+import { MARCA, MODELO, PROCESSADOR } from "../apoio/catalogo";
 import { criarEmpresa, criarPessoa, limparBanco } from "../apoio/fabricas";
 
 async function ator(contaId: string): Promise<Ator> {
@@ -46,17 +47,25 @@ async function cenario() {
 let serie = 0;
 const notebook = (empresaId: string, n = 5001, extra: Partial<DadosEquipamento> = {}): DadosEquipamento => ({
   categoria: "NOTEBOOK",
-  nomeDispositivo: `NBI${n}`,
+  processadorId: PROCESSADOR.i5, // código 5: o identificador é gerado (NBI5001, NBI5002...)
   patrimonio: `VLR-9${n}`,
   empresaId,
-  marca: "Dell",
-  modelo: "Latitude 5440",
+  marcaId: MARCA.Dell,
+  modeloId: MODELO.latitude5440,
   numeroSerie: `SIM-T${n}-${++serie}`,
-  processador: "Intel Core i5",
   memoriaRam: "16 GB",
   ...extra,
 });
-const monitor = (empresaId: string, n = 7001): DadosEquipamento => ({ categoria: "MONITOR", patrimonio: `VLR-9${n}`, empresaId, marca: "LG", modelo: "24MP400", numeroSerie: `SIM-M${n}-${++serie}` });
+/** Categoria sem identificação automática: nome informado (opcional) ou patrimônio. */
+const desktop = (empresaId: string, extra: Partial<DadosEquipamento> = {}): DadosEquipamento => ({
+  categoria: "DESKTOP",
+  patrimonio: `VLR-8${++serie}`,
+  empresaId,
+  marcaId: MARCA.Dell,
+  modeloId: MODELO.optiplex,
+  ...extra,
+});
+const monitor = (empresaId: string, n = 7001): DadosEquipamento => ({ categoria: "MONITOR", patrimonio: `VLR-9${n}`, empresaId, marcaId: MARCA.LG, modeloId: MODELO.lg24, numeroSerie: `SIM-M${n}-${++serie}` });
 
 async function carregadoresDe(notebookId: string) {
   return prisma.ativo.findMany({ where: { notebookId }, orderBy: { sequenciaCarregador: "asc" } });
@@ -73,11 +82,12 @@ describe("cadastro de equipamentos", () => {
   it("notebook nasce com o carregador principal C1 na mesma transação, com histórico e auditoria", async () => {
     const { empresa, supervisor } = await cenario();
     const r = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id), chaveRequisicao: randomUUID() });
+    expect(r).toMatchObject({ nome: "NBI5001", carregador: "NBI5001.C1", repetido: false });
     const [c1] = await carregadoresDe(r.id);
-    expect(c1).toMatchObject({ categoria: "CARREGADOR", nomeDispositivo: "NBI5001C1", sequenciaCarregador: 1, situacao: "DISPONIVEL", empresaId: empresa.id, patrimonio: null });
+    expect(c1).toMatchObject({ categoria: "CARREGADOR", nomeDispositivo: "NBI5001.C1", sequenciaCarregador: 1, situacao: "DISPONIVEL", empresaId: empresa.id, patrimonio: null });
     const ficha = await obterEquipamento(supervisor, r.id);
     expect(ficha).toMatchObject({ nome: "NBI5001", patrimonio: "VLR-95001", situacao: "DISPONIVEL", responsavel: null, ter: null });
-    expect(ficha.carregadores.map((c) => c.nome)).toEqual(["NBI5001C1"]);
+    expect(ficha.carregadores.map((c) => c.nome)).toEqual(["NBI5001.C1"]);
     expect(ficha.movimentacoes.map((m) => m.tipo).sort()).toEqual(["CADASTRO", "CARREGADOR_VINCULADO"]);
     expect(await prisma.eventoAuditoria.count({ where: { acao: "ativo.criar", alvoId: r.id, resultado: "SUCESSO" } })).toBe(1);
 
@@ -91,7 +101,7 @@ describe("cadastro de equipamentos", () => {
     const chave = randomUUID();
     const r1 = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id), chaveRequisicao: chave });
     const r2 = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id), chaveRequisicao: chave });
-    expect(r2).toEqual({ id: r1.id, repetido: true });
+    expect(r2).toMatchObject({ id: r1.id, repetido: true });
 
     const outra = randomUUID();
     const simultaneos = await Promise.all([1, 2, 3].map(() => cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5002), chaveRequisicao: outra })));
@@ -103,18 +113,23 @@ describe("cadastro de equipamentos", () => {
     const { empresa, supervisor } = await cenario();
     await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5001, { numeroSerie: "SIM-UNICA" }) });
     await expect(cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5003, { patrimonio: "vlr-95001" }) })).rejects.toThrow(/patrimônio já está cadastrado/);
-    await expect(cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5003, { nomeDispositivo: "nbi5001" }) })).rejects.toThrow(/nome de dispositivo já está cadastrado/);
     await expect(cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5003, { numeroSerie: "sim-unica" }) })).rejects.toThrow(/número de série já está cadastrado/);
-    // O nome de um carregador também é único: um notebook não pode se chamar NBI5001C1.
-    await expect(cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5003, { nomeDispositivo: "NBI5001C1" }) })).rejects.toThrow(/nome de dispositivo/);
+    // Categoria sem identificação automática: o nome informado também não repete um gerado (nem o do carregador).
+    await expect(cadastrarEquipamento(supervisor, { dados: desktop(empresa.id, { nomeDispositivo: "nbi5001" }) })).rejects.toThrow(/nome de dispositivo já está cadastrado/);
+    await expect(cadastrarEquipamento(supervisor, { dados: desktop(empresa.id, { nomeDispositivo: "NBI5001.C1" }) })).rejects.toThrow(/nome de dispositivo/);
     expect(await prisma.ativo.count({ where: { categoria: "NOTEBOOK" } })).toBe(1);
   });
 
-  it("valida o cadastro no servidor: notebook exige nome; carregador não é avulso; empresa inativa e datas", async () => {
+  it("valida o cadastro no servidor: notebook exige processador com código; carregador não é avulso; categoria inativa, empresa inativa e datas", async () => {
     const { empresa, supervisor } = await cenario();
-    await expect(cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5001, { nomeDispositivo: "" }) })).rejects.toThrow(/nome do dispositivo/);
-    await expect(cadastrarEquipamento(supervisor, { dados: { ...notebook(empresa.id), categoria: "CARREGADOR" } })).rejects.toThrow(/categoria/);
-    await expect(cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5001, { nomeDispositivo: "NB 5001" }) })).rejects.toThrow(/letras sem acento/);
+    await expect(cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5001, { processadorId: null }) })).rejects.toThrow(/modelo do processador/);
+    // Processador sem código de nomenclatura: a TI configura antes (nenhum código é inventado).
+    await expect(cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5001, { processadorId: PROCESSADOR.ryzen5 }) })).rejects.toThrow(/não tem código de nomenclatura/);
+    await expect(cadastrarEquipamento(supervisor, { dados: { ...notebook(empresa.id), categoria: "CARREGADOR" } })).rejects.toThrow(/Carregadores nascem com o notebook/);
+    await expect(cadastrarEquipamento(supervisor, { dados: desktop(empresa.id, { nomeDispositivo: "NB 5001" }) })).rejects.toThrow(/letras sem acento/);
+    await expect(cadastrarEquipamento(supervisor, { dados: desktop(empresa.id, { patrimonio: null }) })).rejects.toThrow(/patrimônio ou o nome/);
+    await prisma.categoriaEquipamento.update({ where: { codigo: "MONITOR" }, data: { ativa: false } });
+    await expect(cadastrarEquipamento(supervisor, { dados: monitor(empresa.id) })).rejects.toThrow(/Monitor está inativa/);
     await expect(cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5001, { dataAquisicao: "2026-05-01", garantiaAte: "2025-01-01" }) })).rejects.toThrow(/Garantia/);
     await prisma.empresa.update({ where: { id: empresa.id }, data: { ativa: false } });
     await expect(cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) })).rejects.toThrow(/inativa/);
@@ -140,20 +155,21 @@ describe("cadastro de equipamentos", () => {
       cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5004), fotos: Array.from({ length: 13 }, () => ({ tipo: "OUTRA", dados: PNG })) }),
     ).rejects.toThrow(/no máximo 12/);
     await expect(cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5004), fotos: [{ tipo: "SELFIE", dados: PNG }] })).rejects.toThrow(/Tipo de foto/);
-    expect(await prisma.ativo.count({ where: { nomeDispositivo: "NBI5004" } })).toBe(0);
+    expect(await prisma.ativo.count({ where: { categoria: "NOTEBOOK" } })).toBe(1);
   });
 
-  it("edição: renomear o notebook renomeia os carregadores; a empresa proprietária não muda pela edição", async () => {
+  it("edição: o identificador gerado e a empresa proprietária não mudam; o processador muda sem renomear", async () => {
     const { empresa, outra, supervisor } = await cenario();
     const r = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
     await adicionarCarregador(supervisor, { notebookId: r.id });
-    await editarEquipamento(supervisor, { id: r.id, dados: notebook(empresa.id, 5001, { nomeDispositivo: "NBI6001", numeroSerie: undefined }) });
+    await editarEquipamento(supervisor, { id: r.id, dados: notebook(empresa.id, 5001, { nomeDispositivo: "NBI6001", numeroSerie: undefined, processadorId: PROCESSADOR.i7_1355U }) });
+    expect(await prisma.ativo.findUniqueOrThrow({ where: { id: r.id } })).toMatchObject({ nomeDispositivo: "NBI5001", processadorId: PROCESSADOR.i7_1355U, processador: "Intel Core i7-1355U" });
     expect((await carregadoresDe(r.id)).map((c) => [c.nomeDispositivo, c.empresaId])).toEqual([
-      ["NBI6001C1", empresa.id],
-      ["NBI6001C2", empresa.id],
+      ["NBI5001.C1", empresa.id],
+      ["NBI5001.C2", empresa.id],
     ]);
     // Mudar a empresa só pela transferência entre empresas (bloqueio no servidor, não só na tela).
-    await expect(editarEquipamento(supervisor, { id: r.id, dados: notebook(outra.id, 5001, { nomeDispositivo: "NBI6001" }) })).rejects.toThrow(/transferência entre empresas/);
+    await expect(editarEquipamento(supervisor, { id: r.id, dados: notebook(outra.id, 5001) })).rejects.toThrow(/transferência entre empresas/);
     expect((await prisma.ativo.findUniqueOrThrow({ where: { id: r.id } })).empresaId).toBe(empresa.id);
     expect(await prisma.movimentacaoAtivo.count({ where: { ativoId: r.id, tipo: "TRANSFERENCIA_EMPRESA" } })).toBe(0);
   });
@@ -163,9 +179,9 @@ describe("carregadores", () => {
   it("C2 e C3 seguem a sequência; adições simultâneas não repetem posição", async () => {
     const { empresa, supervisor } = await cenario();
     const r = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
-    expect((await adicionarCarregador(supervisor, { notebookId: r.id })).nome).toBe("NBI5001C2");
+    expect((await adicionarCarregador(supervisor, { notebookId: r.id })).nome).toBe("NBI5001.C2");
     const simultaneos = await Promise.all([1, 2, 3].map(() => adicionarCarregador(supervisor, { notebookId: r.id })));
-    expect(simultaneos.map((s) => s.nome).sort()).toEqual(["NBI5001C3", "NBI5001C4", "NBI5001C5"]);
+    expect(simultaneos.map((s) => s.nome).sort()).toEqual(["NBI5001.C3", "NBI5001.C4", "NBI5001.C5"]);
     expect((await carregadoresDe(r.id)).map((c) => c.sequenciaCarregador)).toEqual([1, 2, 3, 4, 5]);
   });
 
@@ -173,11 +189,11 @@ describe("carregadores", () => {
     const { empresa, supervisor, pessoa } = await cenario();
     const r = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
     const [c1] = await carregadoresDe(r.id);
-    const a = await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [r.id, c1.id], modo: "ENTREGAR" });
+    const a = await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [r.id, c1.id], modo: "ENTREGAR" });
 
     await expect(desvincularCarregador(supervisor, { carregadorId: c1.id, motivo: "PERDA", observacao: "Esquecido na obra", substituir: false })).rejects.toThrow(/sem carregador vinculado/);
     const { substituto } = await desvincularCarregador(supervisor, { carregadorId: c1.id, motivo: "PERDA", observacao: "Esquecido na obra", substituir: true });
-    expect(substituto?.nome).toBe("NBI5001C2");
+    expect(substituto?.nome).toBe("NBI5001.C2");
 
     const [antigo, novo] = await carregadoresDe(r.id);
     expect(antigo).toMatchObject({ situacao: "BAIXADO", motivoDesvinculo: "PERDA" });
@@ -187,8 +203,8 @@ describe("carregadores", () => {
     expect(detalhe.estado).toBe("ATIVA");
     expect(detalhe.itens.map((i) => [i.ativo.nome, i.aberto, i.motivoEncerramento])).toEqual(
       expect.arrayContaining([
-        ["NBI5001C1", false, "SUBSTITUICAO"],
-        ["NBI5001C2", true, null],
+        ["NBI5001.C1", false, "SUBSTITUICAO"],
+        ["NBI5001.C2", true, null],
         ["NBI5001", true, null],
       ]),
     );
@@ -212,16 +228,16 @@ describe("alocações", () => {
     const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
     const mon = await cadastrarEquipamento(supervisor, { dados: monitor(outra.id) });
     const [c1] = await carregadoresDe(nb.id);
-    const a = await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id, c1.id, mon.id], modo: "ENTREGAR", observacoes: "Kit de admissão" });
-    expect(a.numero).toMatch(/^ALO-\d{4}-0001$/);
+    const a = await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id, c1.id, mon.id], modo: "ENTREGAR", observacoes: "Kit de admissão" });
+    expect(a.numero).toBe("AL0001"); // formato curto, sem ano
 
     const d = await obterAlocacao(supervisor, a.id);
     expect(d).toMatchObject({ estado: "ATIVA", empresaColaborador: { id: pessoa.empresaId }, termos: [] });
     expect(d.entregueEm).not.toBeNull();
     expect(Object.fromEntries(d.itens.map((i) => [i.ativo.nome ?? i.ativo.patrimonio, i.empresaProprietaria.id]))).toEqual({
       NBI5001: empresa.id,
-      NBI5001C1: empresa.id,
-      "VLR-97001": outra.id,
+      "NBI5001.C1": empresa.id,
+      MNT001: outra.id,
     });
     // A propriedade do patrimônio não muda com a entrega a colaborador de outra empresa.
     expect((await prisma.ativo.findUniqueOrThrow({ where: { id: mon.id } })).empresaId).toBe(outra.id);
@@ -235,7 +251,7 @@ describe("alocações", () => {
     const { empresa, supervisor, pessoa } = await cenario();
     const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
     const amanha = new Date(Date.now() + 2 * 86_400_000).toISOString().slice(0, 10);
-    const reserva = await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id], modo: "RESERVAR", data: amanha });
+    const reserva = await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id], modo: "RESERVAR", data: amanha });
     let ficha = await obterEquipamento(supervisor, nb.id);
     expect(ficha).toMatchObject({ situacao: "RESERVADO", responsavel: null, reserva: { id: pessoa.colaboradorId, previstaPara: amanha } });
     await expect(registrarDevolucao(supervisor, { alocacaoId: reserva.id, itens: [] })).rejects.toThrow();
@@ -246,12 +262,12 @@ describe("alocações", () => {
     await expect(cancelarReserva(supervisor, { alocacaoId: reserva.id, motivo: "Desistência" })).rejects.toThrow(/registre a devolução/);
 
     const m = await cadastrarEquipamento(supervisor, { dados: monitor(empresa.id) });
-    const outra = await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [m.id], modo: "RESERVAR" });
+    const outra = await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [m.id], modo: "RESERVAR" });
     await expect(cancelarReserva(supervisor, { alocacaoId: outra.id, motivo: " " })).rejects.toThrow(/motivo/);
     await cancelarReserva(supervisor, { alocacaoId: outra.id, motivo: "Colaborador não iniciou" });
     expect((await prisma.ativo.findUniqueOrThrow({ where: { id: m.id } })).situacao).toBe("DISPONIVEL");
     expect((await prisma.alocacao.findUniqueOrThrow({ where: { id: outra.id } })).estado).toBe("CANCELADA");
-    await expect(criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [m.id], modo: "RESERVAR", data: "2020-01-01" })).rejects.toThrow(/passado/);
+    await expect(criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [m.id], modo: "RESERVAR", data: "2020-01-01" })).rejects.toThrow(/passado/);
   });
 
   it("um patrimônio não tem duas alocações abertas, nem com pedidos simultâneos", async () => {
@@ -259,7 +275,7 @@ describe("alocações", () => {
     const outraPessoa = await criarPessoa({ ativada: true });
     const nb = await cadastrarEquipamento(supervisor, { dados: monitor(empresa.id) });
     const resultados = await Promise.allSettled(
-      [pessoa, outraPessoa, pessoa].map((p) => criarAlocacao(supervisor, { colaboradorId: p.colaboradorId, ativoIds: [nb.id], modo: "ENTREGAR" })),
+      [pessoa, outraPessoa, pessoa].map((p) => criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: p.colaboradorId, ativoIds: [nb.id], modo: "ENTREGAR" })),
     );
     expect(resultados.filter((r) => r.status === "fulfilled")).toHaveLength(1);
     for (const r of resultados.filter((x): x is PromiseRejectedResult => x.status === "rejected")) expect(r.reason).toBeInstanceOf(ErroNegocio);
@@ -274,13 +290,13 @@ describe("alocações", () => {
     const a1 = await cadastrarEquipamento(supervisor, { dados: monitor(empresa.id, 7001) });
     const a2 = await cadastrarEquipamento(supervisor, { dados: monitor(empresa.id, 7002) });
     const chave = randomUUID();
-    const pedidos = await Promise.all([1, 2].map(() => criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [a1.id], modo: "ENTREGAR", chaveRequisicao: chave })));
+    const pedidos = await Promise.all([1, 2].map(() => criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [a1.id], modo: "ENTREGAR", chaveRequisicao: chave })));
     expect(new Set(pedidos.map((p) => p.id)).size).toBe(1);
     expect(await prisma.alocacao.count()).toBe(1);
 
     await enviarParaManutencao(supervisor, { ativoId: a2.id, motivo: "Tela com manchas", observacoes: "Faixas na lateral" });
-    await expect(criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [a2.id], modo: "ENTREGAR" })).rejects.toThrow(/em manutenção e não pode ser alocado/);
-    await expect(criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [a2.id], modo: "RESERVAR" })).rejects.toThrow(/em manutenção/);
+    await expect(criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [a2.id], modo: "ENTREGAR" })).rejects.toThrow(/em manutenção e não pode ser alocado/);
+    await expect(criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [a2.id], modo: "RESERVAR" })).rejects.toThrow(/em manutenção/);
   });
 });
 
@@ -290,7 +306,7 @@ describe("devolução", () => {
     const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
     const mon = await cadastrarEquipamento(supervisor, { dados: monitor(empresa.id) });
     const [c1] = await carregadoresDe(nb.id);
-    const a = await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id, c1.id, mon.id], modo: "ENTREGAR" });
+    const a = await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id, c1.id, mon.id], modo: "ENTREGAR" });
     const itens = Object.fromEntries((await obterAlocacao(supervisor, a.id)).itens.map((i) => [i.ativo.id, i.id]));
 
     const parcial = await registrarDevolucao(supervisor, {
@@ -357,7 +373,7 @@ describe("manutenção", () => {
     const { empresa, supervisor, pessoa } = await cenario();
     const nb = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id) });
     const [c1] = await carregadoresDe(nb.id);
-    const a = await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id, c1.id], modo: "ENTREGAR" });
+    const a = await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id, c1.id], modo: "ENTREGAR" });
     await registrarTerAssinado(supervisor, { alocacaoId: a.id, pdf: PDF });
 
     await expect(enviarParaManutencao(supervisor, { ativoId: nb.id, motivo: "Teclado falhando", observacoes: "Teclas sem resposta" })).rejects.toThrow(/Confirme o recolhimento físico/);
@@ -378,7 +394,7 @@ describe("manutenção", () => {
     expect(mov.observacao).toContain("Teclado falhando");
     // Reservado não vai para manutenção sem cancelar a reserva.
     const mon = await cadastrarEquipamento(supervisor, { dados: monitor(empresa.id) });
-    await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [mon.id], modo: "RESERVAR" });
+    await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [mon.id], modo: "RESERVAR" });
     await expect(enviarParaManutencao(supervisor, { ativoId: mon.id, motivo: "x", observacoes: "y" })).rejects.toThrow(/cancele a reserva/);
     await concluirManutencao(supervisor, { manutencaoId: r.id, resultado: "SEM_REPARO", servicoRealizado: "Placa danificada" });
     expect((await prisma.ativo.findUniqueOrThrow({ where: { id: nb.id } })).situacao).toBe("BAIXADO");
@@ -389,7 +405,7 @@ describe("TER e entrega", () => {
   it("entrega independe do TER; só PDF válido marca assinado, sem alterar a alocação; o banco recusa assinado sem PDF", async () => {
     const { empresa, supervisor, pessoa } = await cenario();
     const m = await cadastrarEquipamento(supervisor, { dados: monitor(empresa.id) });
-    const a = await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [m.id], modo: "ENTREGAR" });
+    const a = await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [m.id], modo: "ENTREGAR" });
     expect((await obterAlocacao(supervisor, a.id)).termos).toEqual([]); // entregue, sem TER
     await expect(registrarTerAssinado(supervisor, { alocacaoId: a.id, pdf: Buffer.from("não é pdf") })).rejects.toThrow(/PDF/);
     const r = await registrarTerAssinado(supervisor, { alocacaoId: a.id, pdf: PDF });
@@ -408,7 +424,7 @@ describe("TER e entrega", () => {
     await expect(prisma.termo.create({ data: { numero: "TER-TESTE-1", tipo: "TER", alocacaoId: a.id, colaboradorId: pessoa.colaboradorId, estado: "ASSINADO" } })).rejects.toThrow();
 
     const mon = await cadastrarEquipamento(supervisor, { dados: monitor(empresa.id, 7002) });
-    const reserva = await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [mon.id], modo: "RESERVAR" });
+    const reserva = await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [mon.id], modo: "RESERVAR" });
     await expect(registrarTerAssinado(supervisor, { alocacaoId: reserva.id, pdf: PDF })).rejects.toThrow(/depois da entrega física/);
   });
 });
@@ -418,34 +434,43 @@ describe("lista do inventário", () => {
     const { empresa, outra, supervisor, pessoa } = await cenario();
     const entregue = await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5001) });
     await cadastrarEquipamento(supervisor, { dados: notebook(empresa.id, 5002) });
-    await cadastrarEquipamento(supervisor, { dados: notebook(outra.id, 5003, { marca: "Lenovo", modelo: "ThinkPad E14" }) });
+    await cadastrarEquipamento(supervisor, { dados: notebook(outra.id, 5003, { marcaId: MARCA.Lenovo, modeloId: MODELO.thinkpadE14 }) });
     const mon = await cadastrarEquipamento(supervisor, { dados: monitor(empresa.id) });
-    await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [entregue.id], modo: "ENTREGAR" });
-    await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [mon.id], modo: "RESERVAR" });
+    await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [entregue.id], modo: "ENTREGAR" });
+    await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [mon.id], modo: "RESERVAR" });
 
+    // Cada peça física é um registro próprio na lista: os carregadores C1 também aparecem.
     const tudo = await listarInventario(supervisor);
-    expect(tudo.total).toBe(4); // carregadores só com o filtro de tipo
-    expect(Object.keys(tudo.linhas[0]).sort()).toEqual(["categoria", "empresa", "id", "marca", "miniatura", "modelo", "nome", "patrimonio", "situacao"]);
-    expect(tudo.indicadores).toMatchObject({ total: 4, disponiveis: 2, alocados: 1, reservados: 1, manutencao: 0, baixados: 0 });
-    expect(tudo.indicadores.porTipo).toEqual([{ categoria: "NOTEBOOK", total: 3 }, { categoria: "MONITOR", total: 1 }]);
+    expect(tudo.total).toBe(7);
+    expect(Object.keys(tudo.linhas[0]).sort()).toEqual(["categoria", "empresa", "especificacao", "formato", "id", "instaladoEm", "marca", "miniatura", "modelo", "nome", "patrimonio", "situacao", "tipo"]);
+    expect(tudo.indicadores).toMatchObject({ total: 7, disponiveis: 5, alocados: 1, reservados: 1, manutencao: 0, baixados: 0 });
+    expect(tudo.indicadores.porTipo.map((t) => [t.nome, t.total])).toEqual([
+      ["Notebook", 3],
+      ["Carregador de notebook", 3],
+      ["Monitor", 1],
+    ]);
 
     const disponiveis = await listarInventario(supervisor, { situacao: "DISPONIVEL" });
-    expect(disponiveis.total).toBe(2);
-    expect(disponiveis.indicadores).toMatchObject({ total: 4, disponiveis: 2, alocados: 1, reservados: 1 });
-    expect(disponiveis.indicadores.porTipo).toEqual([{ categoria: "NOTEBOOK", total: 2 }]);
-    expect(disponiveis.indicadores.porEmpresa.map((e) => [e.id, e.total]).sort()).toEqual([[empresa.id, 1], [outra.id, 1]].sort());
-    expect(disponiveis.indicadores.porMarca).toEqual(expect.arrayContaining([{ marca: "Dell", total: 1 }, { marca: "Lenovo", total: 1 }]));
+    expect(disponiveis.total).toBe(5);
+    expect(disponiveis.indicadores).toMatchObject({ total: 7, disponiveis: 5, alocados: 1, reservados: 1 });
+    expect(disponiveis.indicadores.porTipo.map((t) => [t.nome, t.total])).toEqual([
+      ["Carregador de notebook", 3],
+      ["Notebook", 2],
+    ]);
+    expect(disponiveis.indicadores.porEmpresa.map((e) => [e.id, e.total]).sort()).toEqual([[empresa.id, 3], [outra.id, 2]].sort());
+    expect(disponiveis.indicadores.porMarca).toEqual(expect.arrayContaining([{ marca: "Dell", total: 3 }, { marca: "Lenovo", total: 2 }]));
 
     const daEmpresa = await listarInventario(supervisor, { empresaId: empresa.id });
-    expect(daEmpresa.indicadores).toMatchObject({ total: 3, disponiveis: 1, alocados: 1, reservados: 1 });
-    expect(daEmpresa.indicadores.porEmpresa).toEqual([expect.objectContaining({ id: empresa.id, total: 3 })]);
+    expect(daEmpresa.indicadores).toMatchObject({ total: 5, disponiveis: 3, alocados: 1, reservados: 1 });
+    expect(daEmpresa.indicadores.porEmpresa).toEqual([expect.objectContaining({ id: empresa.id, total: 5 })]);
 
     expect((await listarInventario(supervisor, { busca: "vlr-95002" })).linhas.map((l) => l.nome)).toEqual(["NBI5002"]);
     expect((await listarInventario(supervisor, { busca: "thinkpad" })).linhas.map((l) => l.nome)).toEqual(["NBI5003"]);
     // Responsável não é critério de pesquisa do inventário (fica em Alocações).
     const { nome } = await prisma.colaborador.findUniqueOrThrow({ where: { id: pessoa.colaboradorId }, select: { nome: true } });
     expect((await listarInventario(supervisor, { busca: nome })).total).toBe(0);
-    expect((await listarInventario(supervisor, { categoria: "CARREGADOR" })).total).toBe(3);
+    const carregador = await prisma.categoriaEquipamento.findUniqueOrThrow({ where: { codigo: "CARREGADOR" } });
+    expect((await listarInventario(supervisor, { categoriaId: carregador.id })).total).toBe(3);
   });
 });
 
@@ -456,17 +481,17 @@ describe("permissões e histórico", () => {
     await expect(cadastrarEquipamento(comum, { dados: notebook(empresa.id) })).rejects.toBeInstanceOf(ErroAutorizacao);
     await expect(listarInventario(comum)).rejects.toBeInstanceOf(ErroAutorizacao);
     const nb = await cadastrarEquipamento(supervisor, { dados: monitor(empresa.id) });
-    await expect(criarAlocacao(comum, { colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id], modo: "ENTREGAR" })).rejects.toBeInstanceOf(ErroAutorizacao);
+    await expect(criarAlocacao(comum, { responsavelTiContaId: comum.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id], modo: "ENTREGAR" })).rejects.toBeInstanceOf(ErroAutorizacao);
     await expect(enviarParaManutencao(comum, { ativoId: nb.id, motivo: "x", observacoes: "y" })).rejects.toBeInstanceOf(ErroAutorizacao);
     await expect(obterEquipamento(comum, nb.id)).rejects.toBeInstanceOf(ErroAutorizacao);
-    await criarAlocacao(supervisor, { colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id], modo: "ENTREGAR" });
+    await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id], modo: "ENTREGAR" });
     expect((await obterEquipamento(comum, nb.id)).id).toBe(nb.id);
     expect(await prisma.eventoAuditoria.count({ where: { resultado: "NEGADO", atorContaId: pessoa.contaId } })).toBeGreaterThanOrEqual(4);
 
     // O Estagiário opera o inventário no dia a dia (PM §12).
     const estagiario = await ator((await criarPessoa({ perfis: ["ESTAGIARIO_TI"], ativada: true })).contaId);
     const r = await cadastrarEquipamento(estagiario, { dados: notebook(empresa.id, 5009) });
-    await criarAlocacao(estagiario, { colaboradorId: pessoa.colaboradorId, ativoIds: [r.id], modo: "ENTREGAR" });
+    await criarAlocacao(estagiario, { responsavelTiContaId: estagiario.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [r.id], modo: "ENTREGAR" });
   });
 
   it("o histórico de movimentações é somente inserção", async () => {
