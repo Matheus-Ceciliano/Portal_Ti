@@ -8,9 +8,9 @@ import { carregarAtor, type Ator } from "@/server/authz/ator";
 import { ErroAutorizacao } from "@/server/authz/exigir";
 import { prisma } from "@/server/db";
 import { criarMarca, criarModelo, listarCatalogos, modelosDaMarca } from "@/server/modulos/catalogos";
-import { cadastrarEquipamento } from "@/server/modulos/inventario";
 import { MARCA, MODELO, PROCESSADOR } from "../apoio/catalogo";
 import { criarEmpresa, criarPessoa, limparBanco } from "../apoio/fabricas";
+import { cadastrarComInspecao } from "../apoio/inspecao";
 
 async function ator(contaId: string): Promise<Ator> {
   const a = await carregarAtor(prisma, contaId, { mfaVerificado: true });
@@ -41,7 +41,7 @@ describe("marcas e modelos", () => {
     // Grafia em minúscula entra na ordem sem diferenciar maiúsculas.
     await criarModelo(supervisor, { nome: "inspiron 15", marcaId: MARCA.Dell, categoriaId: notebook });
     for (let n = 1; n <= 2; n++) {
-      await cadastrarEquipamento(supervisor, {
+      await cadastrarComInspecao(supervisor, {
         dados: { categoria: "NOTEBOOK", processadorId: PROCESSADOR.i5, empresaId: empresa.id, marcaId: MARCA.Dell, modeloId: MODELO.latitude5440, numeroSerie: `SIM-CAT-${n}` },
       });
     }

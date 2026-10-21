@@ -49,7 +49,7 @@ export function GaleriaFotos({ fotos, titulo = "Fotos do equipamento", compacta 
 
       <Dialog open={atual !== null} onOpenChange={(v) => !v && setAberta(null)}>
         <DialogContent
-          className={cn(MODAL_CENTRALIZADO, "flex max-h-[calc(100dvh-1rem)] w-[calc(100%-1rem)] max-w-none flex-col gap-3 p-3 sm:w-[min(1100px,calc(100%-2rem))] sm:max-w-none sm:p-4 lg:w-[min(1100px,calc(100%-17rem))]")}
+          className={cn(MODAL_CENTRALIZADO, "flex max-h-[calc(100dvh-1rem)] w-[calc(100%-1rem)] max-w-none flex-col gap-3 p-3 sm:w-[min(1100px,calc(100%-2rem))] sm:max-w-none sm:p-4 lg:w-[min(1100px,calc(100%_-_var(--largura-sidebar,15rem)_-_2rem))]")}
           onKeyDown={(e) => {
             if (e.key === "ArrowRight") ir(1);
             if (e.key === "ArrowLeft") ir(-1);

@@ -23,9 +23,13 @@ import { carregarAlvo } from "@/server/authz/ator";
 import { PERFIS_ADMINISTRATIVOS, type PerfilTi } from "@/server/authz/catalogo";
 import { ErroAutorizacao, ErroNegocio, executarCasoDeUso, exigirPermissao, pode } from "@/server/authz/exigir";
 import type { EstadoTermo } from "@/generated/prisma/client";
+import { mascararCpf } from "@/lib/cpf";
+import { situacaoTer, type SituacaoTer } from "@/lib/ter";
+import { protegerCpf } from "@/server/cpf";
 import { prisma, type ClienteBanco } from "@/server/db";
 import { garantirOutroAdministrador } from "./perfis";
 import { rotuloTipo, SELECAO_TIPO } from "./inventario-base";
+import { retomarPendentesDoColaborador } from "./ter";
 
 /* Listagem */
 
@@ -213,6 +217,8 @@ export type DocumentoPessoa = {
   numero: string;
   tipo: "TER" | "TDV";
   estado: EstadoTermo;
+  /** TER emitido pelo portal: situação resumida (documento e assinatura). */
+  situacao: SituacaoTer | null;
   emitidoEm: string | null;
   assinadoEm: string | null;
   ativos: string[];
@@ -231,6 +237,8 @@ export async function obterDetalhePessoa(ator: Ator, colaboradorId: string) {
   return executarCasoDeUso(ator, async () => {
     const { escopo } = exigirPermissao(ator, "colaborador.ver");
     if (!UUID.test(colaboradorId)) throw new ErroNegocio("Pessoa não encontrada.");
+    // O CPF só aparece (mascarado) para a TI; nem a própria pessoa o vê no portal.
+    const veCpf = escopo === "GRUPO";
     if (escopo !== "GRUPO" && colaboradorId !== ator.colaboradorId) {
       throw new ErroAutorizacao("colaborador.ver", "ESCOPO_PROPRIO", colaboradorId);
     }
@@ -276,6 +284,8 @@ export async function obterDetalhePessoa(ator: Ator, colaboradorId: string) {
             include: {
               alocacao: { select: { itens: { select: { ativo: { select: { patrimonio: true, nomeDispositivo: true } } } } } },
               devolucao: { select: { itens: { select: { itemAlocacao: { select: { ativo: { select: { patrimonio: true, nomeDispositivo: true } } } } } } } },
+              eventoEntrega: { select: { verificacoes: { select: { ativo: { select: { patrimonio: true, nomeDispositivo: true } } } } } },
+              versoes: { orderBy: { versao: "desc" }, take: 1, select: { estado: true, pendencias: true } },
             },
           })
         : [],
@@ -299,9 +309,17 @@ export async function obterDetalhePessoa(ator: Ator, colaboradorId: string) {
       numero: t.numero,
       tipo: t.tipo,
       estado: t.estado,
+      situacao: t.eventoEntregaId
+        ? situacaoTer({ estadoDocumento: t.estadoDocumento, estadoAssinatura: t.estadoAssinatura, pendencias: t.versoes[0]?.estado === "ERRO_GERACAO" ? t.versoes[0].pendencias : [] })
+        : null,
       emitidoEm: t.emitidoEm?.toISOString() ?? null,
       assinadoEm: t.assinadoRegistradoEm?.toISOString() ?? null,
-      ativos: (t.alocacao?.itens.map((x) => x.ativo) ?? t.devolucao?.itens.map((x) => x.itemAlocacao.ativo) ?? []).map((a) => a.patrimonio ?? a.nomeDispositivo ?? "—"),
+      ativos: (
+        t.eventoEntrega?.verificacoes.map((x) => x.ativo) ??
+        t.alocacao?.itens.map((x) => x.ativo) ??
+        t.devolucao?.itens.map((x) => x.itemAlocacao.ativo) ??
+        []
+      ).map((a) => a.nomeDispositivo ?? a.patrimonio ?? "—"),
       disponibilizado: t.disponivelAoColaborador,
       temPdf: Boolean(t.arquivoAssinadoChave),
     }));
@@ -325,6 +343,7 @@ export async function obterDetalhePessoa(ator: Ator, colaboradorId: string) {
         grupoLicenca: c.grupoLicenca,
         identidadeMicrosoftVinculada: Boolean(c.entraObjectId),
         temPerfilTi: alvo.temPerfilTiAtivo,
+        cpf: veCpf ? mascararCpf(c.cpfFinal) : null,
       },
       conta: c.conta
         ? {
@@ -552,6 +571,8 @@ export type EntradaIdentificacao = {
   situacao?: (typeof SITUACOES_EDITAVEIS)[number];
   grupoLicencaId?: string | null;
   foto?: Buffer | null;
+  /** CPF (cifrado ao gravar). Na edição, ausente mantém o atual. */
+  cpf?: string | null;
 };
 
 export type EntradaCadastro = EntradaIdentificacao & {
@@ -594,9 +615,21 @@ async function gravarFoto(foto: Buffer | null | undefined) {
 /** Unicidade violada por corrida entre a verificação e a gravação: mensagem clara, sem detalhes do banco. */
 function traduzirUnicidade(erro: unknown) {
   if (erro && typeof erro === "object" && "code" in erro && (erro as { code: string }).code === "P2002") {
+    if (/cpf/i.test(JSON.stringify((erro as { meta?: unknown }).meta ?? {}))) return new ErroNegocio(CPF_EM_USO);
     return new ErroNegocio("Um dos identificadores acabou de ser usado por outra pessoa. Revise e tente de novo.");
   }
   return erro;
+}
+
+const CPF_EM_USO = "CPF já cadastrado para outra pessoa.";
+
+/** CPF informado: valida, cifra e confere a duplicidade pelo HMAC (o número nunca é comparado em texto). */
+async function prepararCpf(cpf: string | null | undefined, ignorarId?: string) {
+  if (!cpf?.trim()) return null;
+  const protegido = protegerCpf(cpf);
+  const outro = await prisma.colaborador.findUnique({ where: { cpfHmac: protegido.cpfHmac }, select: { id: true } });
+  if (outro && outro.id !== ignorarId) throw new ErroNegocio(CPF_EM_USO);
+  return protegido;
 }
 
 /**
@@ -636,6 +669,7 @@ export async function cadastrarPessoa(ator: Ator, entrada: EntradaCadastro): Pro
     }
     const conflitos = await procurarConflitos(prisma, ids);
     if (conflitos.length) throw new ErroIdentificadores(conflitos);
+    const cpf = await prepararCpf(entrada.cpf);
 
     const hashSenha = await gerarHashSenha(senhaInicial);
     const foto = await gravarFoto(entrada.foto);
@@ -665,6 +699,7 @@ export async function cadastrarPessoa(ator: Ator, entrada: EntradaCadastro): Pro
             loginMicrosoft: ids.loginMicrosoft,
             fotoChave: foto?.chave ?? null,
             fotoTipo: foto?.tipo ?? null,
+            ...(cpf ?? {}),
           },
         });
         await tx.contaAcesso.create({
@@ -691,6 +726,8 @@ export async function cadastrarPessoa(ator: Ator, entrada: EntradaCadastro): Pro
             // Só a origem da senha; o valor nunca vai para a auditoria.
             credencialInicial: entrada.senhaInicial ? "informada" : "formula_planilha",
             segundoNomeAlterado: segundoNome !== calcularSegundoNome(nome),
+            // Só se foi informado; o número nunca vai para a auditoria.
+            cpfInformado: Boolean(cpf),
           },
         });
       });
@@ -790,6 +827,8 @@ export async function editarPessoa(ator: Ator, entrada: EntradaEdicao) {
     if (atual.situacao === "DESLIGADO" && situacao !== "DESLIGADO") {
       throw new ErroNegocio("Pessoa desligada não é reativada pela edição do cadastro.");
     }
+    const cpfInformado = await prepararCpf(entrada.cpf, atual.id);
+    const cpf = cpfInformado && cpfInformado.cpfHmac !== atual.cpfHmac ? cpfInformado : null;
     const foto = await gravarFoto(entrada.foto);
 
     try {
@@ -831,6 +870,7 @@ export async function editarPessoa(ator: Ator, entrada: EntradaEdicao) {
             ...(mudam.includes("nomeServidorPc") ? { chaveServidorPc: chaveServidorPc(finais.nomeServidorPc) } : {}),
             ...(foto ? { fotoChave: foto.chave, fotoTipo: foto.tipo } : {}),
             ...(!foto && entrada.removerFoto ? { fotoChave: null, fotoTipo: null } : {}),
+            ...(cpf ?? {}),
           },
         });
         if (atual.conta && (atual.conta.email !== finais.emailCorporativo || atual.conta.name !== nome)) {
@@ -842,6 +882,7 @@ export async function editarPessoa(ator: Ator, entrada: EntradaEdicao) {
           .filter(([k, v]) => antes[k] !== v)
           .map(([k]) => k);
         if (foto || (entrada.removerFoto && atual.fotoChave)) alterados.push("foto");
+        if (cpf) alterados.push("cpf");
         await registrarAuditoria(tx, {
           acao: "colaborador.editar",
           resultado: "SUCESSO",
@@ -857,7 +898,9 @@ export async function editarPessoa(ator: Ator, entrada: EntradaEdicao) {
       throw traduzirUnicidade(erro);
     }
     if (atual.fotoChave && (foto || entrada.removerFoto)) await obterArmazenamento().remover(atual.fotoChave).catch(() => undefined);
-    return { id: atual.id, nome };
+    // CPF completado: os TERs que esperavam por ele são gerados agora (falha fica no próprio TER).
+    const tersGerados = cpf ? await retomarPendentesDoColaborador(atual.id, ator).catch(() => 0) : 0;
+    return { id: atual.id, nome, tersGerados };
   });
 }
 

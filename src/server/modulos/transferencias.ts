@@ -5,10 +5,14 @@ import { registrarAuditoria } from "@/server/auditoria";
 import type { Ator } from "@/server/authz/ator";
 import { ErroAutorizacao, ErroNegocio, executarCasoDeUso, exigirPermissao } from "@/server/authz/exigir";
 import { prisma, type Transacao } from "@/server/db";
-import { criarAlocacao } from "./alocacoes";
+import { diaDe, exigirEmpresaAutorizada } from "./alugueis";
+import { fotosDasVerificacoes, prepararVerificacoes, type EntradaVerificacao } from "./inspecoes";
+import { emitirAposEntrega, registrarEntregaFisica } from "./ter";
 import {
+  descartarFotos,
   encerrarAlocacaoSemItens,
   encerrarItem,
+  gravarArquivosFotos,
   lerData,
   lerMomento,
   proximoNumeroAlocacao,
@@ -20,12 +24,13 @@ import {
 } from "./inventario-base";
 
 /**
- * Transferências do equipamento, feitas só pela ficha, com histórico e auditoria:
- * - entre colaboradores: com a entrega física confirmada, os itens da alocação anterior são
+ * Transferências do equipamento, com histórico e auditoria:
+ * - entre colaboradores (no detalhe da alocação ativa): com a entrega física confirmada, os itens da alocação anterior são
  *   encerrados e a nova alocação ATIVA nasce na mesma transação (o equipamento nunca fica em
- *   duas alocações abertas). Sem a entrega, só uma reserva: a custódia atual continua (Q-27);
- * - entre empresas: muda a proprietária. Alocação, responsável e empresa do colaborador ficam
- *   como estão.
+ *   duas alocações abertas), com a mesma verificação técnica de uma nova alocação para cada
+ *   item entregue. Sem a entrega, só uma reserva: a custódia atual continua (Q-27);
+ * - entre empresas (na ficha): muda a proprietária. Alocação, responsável e empresa do
+ *   colaborador ficam como estão.
  * Carregadores vinculados acompanham o notebook, sem novo C1 nem renumeração. Termos
  * anteriores não são tocados.
  */
@@ -85,8 +90,12 @@ async function lerEquipamento(tx: Transacao, ativoId: string) {
       empresa: { select: { id: true, nome: true, sigla: true } },
       notebook: { select: { nomeDispositivo: true } },
       carregadores: { where: { desvinculadoEm: null }, orderBy: { sequenciaCarregador: "asc" }, include: { empresa: { select: { nome: true, sigla: true } } } },
-      itensAlocacao: { where: { aberto: true }, include: { alocacao: { include: { colaborador: { select: { id: true, nome: true } } } } } },
+      itensAlocacao: {
+        where: { aberto: true },
+        include: { alocacao: { include: { colaborador: { select: { id: true, nome: true, empresaId: true, empresa: { select: { sigla: true } } } } } } },
+      },
       transferencias: { where: { pendente: true } },
+      alugueis: { where: { vigente: true }, include: { empresaLocataria: { select: { nome: true } } } },
     },
   });
 }
@@ -114,6 +123,8 @@ async function efetivar(tx: Transacao, ator: Ator, a: EquipamentoTravado, destin
     include: { ativo: true },
   });
   const levados = [{ itemId: item.id, ativo: a as { id: string; empresaId: string } }, ...carregadores.map((c) => ({ itemId: c.id, ativo: c.ativo }))];
+  // O novo colaborador precisa ser da proprietária ou, com aluguel vigente, da locatária.
+  await exigirEmpresaAutorizada(tx, [a, ...carregadores.map((c) => c.ativo)], destino.empresaId, diaDe(quando));
   for (const l of levados) await encerrarItem(tx, ator, l.itemId, "TRANSFERENCIA", quando);
   await encerrarAlocacaoSemItens(tx, origem.id);
   const numero = await proximoNumeroAlocacao(tx);
@@ -147,6 +158,23 @@ async function efetivar(tx: Transacao, ator: Ator, a: EquipamentoTravado, destin
   return { origem: { id: origem.id, numero: origem.numero, colaborador: origem.colaborador }, nova: { id: nova.id, numero }, itens: levados.length };
 }
 
+/**
+ * Verificação técnica da entrega física, a mesma de uma nova alocação: cada item da nova
+ * alocação (o equipamento e os carregadores que o acompanham) confirma a última inspeção ou
+ * traz uma nova, sem defeito bloqueante. Roda na transação, depois das regras de custódia e
+ * empresa; faltando um item, nada é gravado. As fotos gravadas entram em `gravadas` para o
+ * chamador descartá-las se a transação falhar. A entrega gera o evento e o TER do novo colaborador.
+ */
+async function verificarEntrega(tx: Transacao, ator: Ator, alocacaoId: string, quando: Date, enviadas: EntradaVerificacao[] | null | undefined, gravadas: string[]) {
+  const itens = await tx.itemAlocacao.findMany({ where: { alocacaoId }, select: { id: true, ativoId: true } });
+  const preparadas = await prepararVerificacoes(tx, itens.map((i) => i.ativoId), enviadas);
+  const fotos = fotosDasVerificacoes(preparadas);
+  if (fotos.length) exigirPermissao(ator, "evidencia.enviar");
+  await gravarArquivosFotos(fotos);
+  gravadas.push(...fotos.map((f) => f.chave));
+  return registrarEntregaFisica(tx, ator, { alocacaoId, tipo: "TRANSFERENCIA", entregueEm: quando, itens, verificacoes: preparadas });
+}
+
 /* Entre colaboradores */
 
 export type EntradaTransferenciaColaborador = {
@@ -162,6 +190,8 @@ export type EntradaTransferenciaColaborador = {
   /** Alocação que o operador viu (nula: em estoque). Se mudou no caminho, nada é gravado. */
   alocacaoAtualId: string | null;
   chaveRequisicao?: string;
+  /** ENTREGAR: verificação técnica de cada item entregue (confirmar a última inspeção ou uma nova). */
+  verificacoes?: EntradaVerificacao[];
 };
 
 export type ResultadoTransferenciaColaborador = {
@@ -170,6 +200,8 @@ export type ResultadoTransferenciaColaborador = {
   colaborador: string;
   numero: string | null;
   repetido: boolean;
+  /** Entrega física: o TER gerado para o novo colaborador. */
+  ter?: Awaited<ReturnType<typeof emitirAposEntrega>>;
 };
 
 async function repeticao(chave: string | null): Promise<ResultadoTransferenciaColaborador | null> {
@@ -201,33 +233,10 @@ export async function transferirColaborador(ator: Ator, e: EntradaTransferenciaC
     if (colaborador.situacao === "DESLIGADO") throw new ErroNegocio("Colaborador desligado não recebe equipamentos.");
     const observacoes = textoLivre(e.observacoes, 1000, "Observação");
 
-    // Em estoque: é uma nova alocação, com as mesmas regras de Alocações (carregadores disponíveis vão junto).
+    // A transferência parte sempre de uma alocação ativa (detalhe da alocação). Em estoque, a
+    // entrega é uma nova alocação.
     if (e.alocacaoAtualId === null) {
-      const a = await prisma.ativo.findUnique({
-        where: { id: e.ativoId },
-        include: {
-          notebook: { select: { nomeDispositivo: true } },
-          carregadores: { where: { desvinculadoEm: null, situacao: "DISPONIVEL" }, select: { id: true } },
-          itensAlocacao: { where: { aberto: true }, select: { id: true } },
-        },
-      });
-      if (!a) throw new ErroNegocio("Equipamento não encontrado.");
-      exigirNaoVinculado(a);
-      if (ehComponente(a.categoria)) throw new ErroNegocio("Componentes internos (RAM, SSD, HD) não são alocados a pessoas: instale-os no notebook.");
-      const bloqueio = BLOQUEIO_TRANSFERENCIA_COLABORADOR[a.situacao as Situacao];
-      if (bloqueio) throw new ErroNegocio(bloqueio);
-      if (a.itensAlocacao.length) throw new ErroNegocio(MOVIMENTADO);
-      const r = await criarAlocacao(ator, {
-        colaboradorId: colaborador.id,
-        ativoIds: [a.id, ...a.carregadores.map((c) => c.id)],
-        modo: e.modo,
-        // Quem executa a transferência responde pela nova alocação.
-        responsavelTiContaId: ator.contaId,
-        data: e.data,
-        observacoes,
-        chaveRequisicao: chave ?? undefined,
-      });
-      return { resultado: entregar ? "ALOCADO" : "RESERVADO", colaborador: colaborador.nome, numero: r.numero, repetido: r.repetido };
+      throw new ErroNegocio("A transferência entre colaboradores é feita a partir de uma alocação ativa. Para equipamento em estoque, registre uma nova alocação.");
     }
 
     if (entregar && !e.confirmacaoFisica) throw new ErroNegocio("Confirme a devolução e a entrega física do equipamento.");
@@ -236,9 +245,11 @@ export async function transferirColaborador(ator: Ator, e: EntradaTransferenciaC
     if (previstaPara && previstaPara.toISOString().slice(0, 10) < new Date().toISOString().slice(0, 10)) {
       throw new ErroNegocio("Data prevista: não pode estar no passado.");
     }
+    const gravadas: string[] = [];
 
+    let feita;
     try {
-      return await prisma.$transaction(async (tx) => {
+      feita = await prisma.$transaction(async (tx) => {
         // Trava o equipamento e só então confere: duas transferências simultâneas não passam.
         const a = await lerEquipamento(tx, e.ativoId);
         exigirNaoVinculado(a);
@@ -269,6 +280,7 @@ export async function transferirColaborador(ator: Ator, e: EntradaTransferenciaC
         const rotulo = rotuloAtivo(a);
 
         if (!entregar) {
+          await exigirEmpresaAutorizada(tx, [a], colaborador.empresaId, previstaPara ? previstaPara.toISOString().slice(0, 10) : diaDe(new Date()));
           await tx.transferencia.create({ data: { ...base, estado: "PENDENTE", previstaPara } });
           await registrarMovimentacao(tx, ator, a.id, {
             tipo: "RESERVA",
@@ -280,10 +292,12 @@ export async function transferirColaborador(ator: Ator, e: EntradaTransferenciaC
             tx,
             auditar(ator, origem, "ativo.transferir_colaborador", { id: a.id, descricao: rotulo }, { modo: "RESERVAR", alocacaoOrigem: item.alocacao.numero }),
           );
-          return { resultado: "RESERVADA" as const, colaborador: colaborador.nome, numero: null, repetido: false };
+          return { resultado: "RESERVADA" as const, colaborador: colaborador.nome, numero: null, repetido: false, ter: null };
         }
 
         const r = await efetivar(tx, ator, a, colaborador, quando, observacoes);
+        // A entrega física da transferência não dispensa o checklist.
+        const ter = await verificarEntrega(tx, ator, r.nova.id, quando, e.verificacoes, gravadas);
         await tx.transferencia.create({
           data: { ...base, estado: "CONCLUIDA", pendente: null, alocacaoDestinoId: r.nova.id, efetivadaEm: quando, concluidaPorNome: ator.nome },
         });
@@ -294,21 +308,28 @@ export async function transferirColaborador(ator: Ator, e: EntradaTransferenciaC
             alocacaoOrigem: r.origem.numero,
             alocacaoDestino: r.nova.numero,
             equipamentos: r.itens,
+            verificacoesTecnicas: r.itens,
+            ter: ter.numero,
           }),
         );
-        return { resultado: "CONCLUIDA" as const, colaborador: colaborador.nome, numero: r.nova.numero, repetido: false };
+        return { resultado: "CONCLUIDA" as const, colaborador: colaborador.nome, numero: r.nova.numero, repetido: false, ter };
       });
     } catch (erro) {
+      await descartarFotos(gravadas);
       // Envio repetido em paralelo: o outro pedido já gravou.
       const repetido = await repeticao(chave);
       if (repetido) return repetido;
       throw traduzirConflito(erro);
     }
+    return { ...feita, ter: await emitirAposEntrega(feita.ter, ator) };
   });
 }
 
 /** Transferência reservada → entrega física: a partir daqui o novo colaborador é responsável. */
-export async function confirmarTransferencia(ator: Ator, e: { transferenciaId: string; data?: string | null; confirmacaoFisica?: boolean }) {
+export async function confirmarTransferencia(
+  ator: Ator,
+  e: { transferenciaId: string; data?: string | null; confirmacaoFisica?: boolean; verificacoes?: EntradaVerificacao[] },
+) {
   return executarCasoDeUso(ator, async () => {
     const { origem } = exigirPermissao(ator, "alocacao.confirmar_entrega");
     exigirPermissao(ator, "devolucao.registrar");
@@ -318,9 +339,11 @@ export async function confirmarTransferencia(ator: Ator, e: { transferenciaId: s
     const quando = lerMomento(e.data, "Data da transferência");
     const previa = await prisma.transferencia.findUnique({ where: { id: e.transferenciaId }, select: { ativoId: true } });
     if (!previa) throw new ErroNegocio("Transferência não encontrada.");
+    const gravadas: string[] = [];
 
+    let feita;
     try {
-      return await prisma.$transaction(async (tx) => {
+      feita = await prisma.$transaction(async (tx) => {
         const a = await lerEquipamento(tx, previa.ativoId);
         const t = await tx.transferencia.findUniqueOrThrow({ where: { id: e.transferenciaId } });
         if (t.estado !== "PENDENTE") throw new ErroNegocio(t.estado === "CONCLUIDA" ? "Esta transferência já foi concluída." : "Esta transferência foi cancelada.");
@@ -331,6 +354,8 @@ export async function confirmarTransferencia(ator: Ator, e: { transferenciaId: s
         const destino = await tx.colaborador.findUnique({ where: { id: t.colaboradorDestinoId! }, select: { id: true, nome: true, situacao: true, empresaId: true } });
         if (!destino || destino.situacao === "DESLIGADO") throw new ErroNegocio("O colaborador de destino foi desligado. Cancele a transferência.");
         const r = await efetivar(tx, ator, a, destino, quando, t.motivo);
+        // Confirmar a reserva é a entrega física: o mesmo checklist de uma nova alocação.
+        const ter = await verificarEntrega(tx, ator, r.nova.id, quando, e.verificacoes, gravadas);
         await tx.transferencia.update({
           where: { id: t.id },
           data: { estado: "CONCLUIDA", pendente: null, alocacaoDestinoId: r.nova.id, efetivadaEm: quando, concluidaPorNome: ator.nome },
@@ -342,13 +367,17 @@ export async function confirmarTransferencia(ator: Ator, e: { transferenciaId: s
             alocacaoOrigem: r.origem.numero,
             alocacaoDestino: r.nova.numero,
             equipamentos: r.itens,
+            verificacoesTecnicas: r.itens,
+            ter: ter.numero,
           }),
         );
-        return { colaborador: destino.nome, numero: r.nova.numero };
+        return { colaborador: destino.nome, numero: r.nova.numero, ter };
       });
     } catch (erro) {
+      await descartarFotos(gravadas);
       throw traduzirConflito(erro);
     }
+    return { ...feita, ter: await emitirAposEntrega(feita.ter, ator) };
   });
 }
 
@@ -436,6 +465,30 @@ export async function transferirEmpresa(ator: Ator, e: EntradaTransferenciaEmpre
         // patrimônio, só muda se escolhido — nunca em silêncio.
         const movidos = a.carregadores.filter((c) => (!c.patrimonio || escolhidos.has(c.id)) && c.empresaId !== destino.id);
         const mantidos = a.carregadores.filter((c) => c.patrimonio && !escolhidos.has(c.id));
+        // A propriedade não muda durante um aluguel (o banco também recusa).
+        if (a.alugueis[0]) throw new ErroNegocio(`${rotuloAtivo(a)} está alugado para ${a.alugueis[0].empresaLocataria.nome}. Encerre o aluguel antes de transferir a propriedade.`);
+        // Quem está com o equipamento (ou com a reserva) precisa ser da empresa de destino: a
+        // alocação nunca é encerrada em silêncio — a TI regulariza antes.
+        const abertos = [
+          ...a.itensAlocacao.map((i) => ({ rotulo: rotuloAtivo(a), alocacao: i.alocacao })),
+          ...(
+            await tx.itemAlocacao.findMany({
+              where: { aberto: true, ativoId: { in: movidos.map((c) => c.id) } },
+              include: { ativo: true, alocacao: { include: { colaborador: { select: { id: true, nome: true, empresaId: true, empresa: { select: { sigla: true } } } } } } },
+            })
+          ).map((i) => ({ rotulo: rotuloAtivo(i.ativo), alocacao: i.alocacao })),
+        ];
+        const fora = abertos.find((x) => x.alocacao.colaborador.empresaId !== destino.id);
+        if (fora) {
+          throw new ErroNegocio(
+            `${fora.rotulo} está com ${fora.alocacao.colaborador.nome} (${fora.alocacao.colaborador.empresa.sigla}, ${fora.alocacao.numero}). A propriedade só pode passar para a empresa do colaborador; para outra empresa, registre a devolução ou cancele a reserva antes.`,
+          );
+        }
+        const pendente = a.transferencias[0];
+        if (pendente?.colaboradorDestinoId) {
+          const alvo = await tx.colaborador.findUnique({ where: { id: pendente.colaboradorDestinoId }, select: { empresaId: true } });
+          if (alvo?.empresaId !== destino.id) throw new ErroNegocio(`Há uma transferência reservada para ${pendente.colaboradorDestinoNome}, de outra empresa: confirme ou cancele antes.`);
+        }
         const de = `${a.empresa.nome} (${a.empresa.sigla})`;
         const para = `${destino.nome} (${destino.sigla})`;
         const nomes = (cs: typeof a.carregadores) => cs.map((c) => (c.patrimonio ? `${c.nomeDispositivo} (${c.patrimonio})` : c.nomeDispositivo)).join(", ");

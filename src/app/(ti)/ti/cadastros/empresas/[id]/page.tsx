@@ -458,7 +458,9 @@ async function Alocacoes({
               confirmar: pode(ator, "alocacao.confirmar_entrega"),
               cancelar: pode(ator, "alocacao.cancelar"),
               devolver: pode(ator, "devolucao.registrar"),
-              anexarTer: pode(ator, "termo.anexar_assinado"),
+              verTer: pode(ator, "termo.ver"),
+              transferir: pode(ator, "alocacao.criar"),
+              avaliar: pode(ator, "ativo.transicionar"),
             }}
           />
           <Paginacao base={base} parametros={parametros} pagina={dados.pagina} paginas={dados.paginas} total={dados.total} rotulo="alocações" />

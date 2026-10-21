@@ -1,32 +1,28 @@
 "use client";
 
-import { ArrowLeftRight, Building2, CheckCircle2, ChevronDown, Pencil, UserRound, Wrench } from "lucide-react";
+import { ArrowLeftRight, Building2, CheckCircle2, ChevronDown, ClipboardCheck, Handshake, Pencil, Undo2, Wrench } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { toast } from "sonner";
 import { Campo } from "@/components/comum/campos";
 import { MODAL_CENTRALIZADO } from "@/components/empresas/posicao-modal";
+import { DialogoAvaliacaoTecnica } from "@/components/inspecoes/dialogos-inspecao";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Textarea } from "@/components/ui/textarea";
 import { ehComponente } from "@/lib/componentes";
-import { PODE_IR_PARA_MANUTENCAO, PODE_TRANSFERIR_COLABORADOR, type Situacao } from "@/lib/inventario";
+import { ROTULO_RESULTADO } from "@/lib/inspecao";
+import { PODE_IR_PARA_MANUTENCAO, type Situacao } from "@/lib/inventario";
 import { cn } from "@/lib/utils";
 import { acaoLiberarAvaliacao } from "@/server/acoes/inventario";
 import type { FichaEquipamento } from "@/server/modulos/inventario";
 import { DialogoEquipamento, type CatalogoCadastro, type EmpresaOpcaoInventario } from "../dialogo-equipamento";
 import { DialogoConcluirManutencao, DialogoEnviarManutencao } from "../dialogos-manutencao";
 import { identificacao } from "../visual";
-import { DialogoTransferirColaborador, DialogoTransferirEmpresa } from "./dialogos-transferencia";
+import { DialogoAlugarEquipamento, DialogoEncerrarAluguel } from "./dialogos-aluguel";
+import { DialogoTransferirEmpresa } from "./dialogos-transferencia";
 import { carregadorVinculado, paraTransferencia } from "./transferencia";
-
-/** Por que a transferência de colaborador não está disponível agora (o servidor confere de novo). */
-const BLOQUEIO_CURTO: Partial<Record<Situacao, string>> = {
-  RESERVADO: "Reservado: use Alocações",
-  MANUTENCAO: "Em manutenção",
-  DEVOLVIDO_EM_AVALIACAO: "Em avaliação",
-};
 
 /** Ações da ficha (cada uma confere a permissão de novo no servidor). */
 export function AcoesFicha({
@@ -38,9 +34,9 @@ export function AcoesFicha({
   ficha: FichaEquipamento;
   empresas: EmpresaOpcaoInventario[];
   catalogo: CatalogoCadastro;
-  pode: { editar: boolean; transicionar: boolean; alocar: boolean; entregar: boolean };
+  pode: { editar: boolean; transicionar: boolean };
 }) {
-  const [aberto, setAberto] = useState<"editar" | "manutencao" | "concluir" | "avaliacao" | "colaborador" | "empresa" | null>(null);
+  const [aberto, setAberto] = useState<"editar" | "manutencao" | "concluir" | "inspecao" | "avaliacao" | "empresa" | "alugar" | "encerrar" | null>(null);
   const [chave, setChave] = useState(0);
   const rotulo = identificacao(ficha);
   const aberta = ficha.manutencoes.find((m) => m.aberta);
@@ -48,17 +44,20 @@ export function AcoesFicha({
     setAberto(v ? qual : null);
     if (!v) setChave((c) => c + 1);
   };
-  // Transferências: nunca de baixado nem de carregador vinculado (segue o notebook).
+  // Entre empresas: nunca de baixado nem de carregador vinculado (segue o notebook). A
+  // transferência entre colaboradores fica em Alocações, no detalhe da alocação ativa.
   const transferivel = ficha.situacao !== "BAIXADO" && !carregadorVinculado(ficha);
-  // RAM, SSD e HD não vão para pessoas: são instalados no notebook.
-  const transferirColaborador = transferivel && pode.alocar && !ehComponente(ficha.categoria);
   const transferirEmpresa = transferivel && pode.editar;
-  const bloqueioColaborador = ficha.transferenciaPendente
-    ? "Transferência reservada pendente"
-    : PODE_TRANSFERIR_COLABORADOR.includes(ficha.situacao as Situacao)
-      ? null
-      : (BLOQUEIO_CURTO[ficha.situacao as Situacao] ?? "Indisponível");
+  // Aluguel entre empresas: do próprio equipamento (o carregador vinculado acompanha o do notebook).
+  const aluguelProprio = ficha.aluguel && !ficha.aluguel.herdado ? ficha.aluguel : null;
+  const alugar = transferivel && pode.editar && !ehComponente(ficha.categoria) && !ficha.aluguel;
+  const encerrarAluguel = pode.editar && Boolean(aluguelProprio);
   const equipamento = paraTransferencia(ficha);
+  // Em avaliação: a inspeção técnica vem antes; liberar só depois dela e sem defeito bloqueante.
+  const emAvaliacao = ficha.situacao === "DEVOLVIDO_EM_AVALIACAO";
+  const pendente = ficha.inspecoes.some((i) => i.estado === "PENDENTE");
+  const inspecaoDaAvaliacao = ficha.inspecoes.find((i) => i.estado === "CONCLUIDA" && i.concluidaEm! >= ficha.situacaoDesde) ?? null;
+  const liberavel = emAvaliacao && !ficha.desvinculadoEm && !pendente && inspecaoDaAvaliacao !== null && inspecaoDaAvaliacao.resultado !== "INAPTO";
 
   return (
     <>
@@ -68,7 +67,7 @@ export function AcoesFicha({
             <Pencil aria-hidden /> Editar
           </Button>
         ) : null}
-        {transferirColaborador || transferirEmpresa ? (
+        {transferirEmpresa || alugar || encerrarAluguel ? (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="secondary" data-testid="transferir">
@@ -76,26 +75,36 @@ export function AcoesFicha({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-60">
-              {transferirColaborador ? (
-                <DropdownMenuItem disabled={Boolean(bloqueioColaborador)} onSelect={() => setAberto("colaborador")}>
-                  <UserRound aria-hidden />
+              {transferirEmpresa ? (
+                <DropdownMenuItem disabled={Boolean(aluguelProprio)} onSelect={() => setAberto("empresa")}>
+                  <Building2 aria-hidden />
                   <span className="flex flex-col">
-                    Transferir colaborador
-                    {bloqueioColaborador ? <span className="text-[12px] font-normal text-muted-foreground">{bloqueioColaborador}</span> : null}
+                    Transferir empresa
+                    {aluguelProprio ? <span className="text-[12px] font-normal text-muted-foreground">Alugado: encerre o aluguel antes</span> : null}
                   </span>
                 </DropdownMenuItem>
               ) : null}
-              {transferirEmpresa ? (
-                <DropdownMenuItem onSelect={() => setAberto("empresa")}>
-                  <Building2 aria-hidden /> Transferir empresa
+              {alugar ? (
+                <DropdownMenuItem onSelect={() => setAberto("alugar")} data-testid="alugar-empresa">
+                  <Handshake aria-hidden /> Alugar para outra empresa
+                </DropdownMenuItem>
+              ) : null}
+              {encerrarAluguel ? (
+                <DropdownMenuItem onSelect={() => setAberto("encerrar")} data-testid="encerrar-aluguel">
+                  <Undo2 aria-hidden /> Encerrar aluguel
                 </DropdownMenuItem>
               ) : null}
             </DropdownMenuContent>
           </DropdownMenu>
         ) : null}
-        {pode.transicionar && ficha.situacao === "DEVOLVIDO_EM_AVALIACAO" && !ficha.desvinculadoEm ? (
-          <Button variant="secondary" onClick={() => setAberto("avaliacao")}>
-            <CheckCircle2 aria-hidden /> Concluir avaliação
+        {pode.transicionar && emAvaliacao ? (
+          <Button variant={liberavel ? "secondary" : "default"} onClick={() => setAberto("inspecao")} data-testid="avaliar-equipamento">
+            <ClipboardCheck aria-hidden /> {pendente ? "Realizar inspeção" : "Nova inspeção"}
+          </Button>
+        ) : null}
+        {pode.transicionar && liberavel ? (
+          <Button onClick={() => setAberto("avaliacao")} data-testid="liberar-equipamento">
+            <CheckCircle2 aria-hidden /> Liberar para uso
           </Button>
         ) : null}
         {pode.transicionar && aberta ? (
@@ -127,19 +136,37 @@ export function AcoesFicha({
           manutencao={{ id: aberta.id, ativoId: ficha.id, rotulo, motivo: aberta.motivo, abertaEm: aberta.abertaEm }}
         />
       ) : null}
-      <DialogoAvaliacao key={`a${chave}`} aberto={aberto === "avaliacao"} aoMudar={mudar("avaliacao")} ativoId={ficha.id} rotulo={rotulo} />
-      {transferirColaborador && !bloqueioColaborador ? (
-        <DialogoTransferirColaborador key={`t${chave}`} aberto={aberto === "colaborador"} aoMudar={mudar("colaborador")} equipamento={equipamento} podeEntregar={pode.entregar} />
+      {pode.transicionar && emAvaliacao ? (
+        <DialogoAvaliacaoTecnica
+          key={`i${chave}`}
+          aberto={aberto === "inspecao"}
+          aoMudar={mudar("inspecao")}
+          equipamento={{ id: ficha.id, rotulo }}
+        />
       ) : null}
-      {transferirEmpresa ? (
+      {liberavel && inspecaoDaAvaliacao ? (
+        <DialogoAvaliacao
+          key={`a${chave}`}
+          aberto={aberto === "avaliacao"}
+          aoMudar={mudar("avaliacao")}
+          ativoId={ficha.id}
+          rotulo={rotulo}
+          inspecao={`${inspecaoDaAvaliacao.numero} (${ROTULO_RESULTADO[inspecaoDaAvaliacao.resultado!].toLowerCase()})`}
+        />
+      ) : null}
+      {transferirEmpresa && !aluguelProprio ? (
         <DialogoTransferirEmpresa key={`p${chave}`} aberto={aberto === "empresa"} aoMudar={mudar("empresa")} equipamento={equipamento} empresas={empresas} />
+      ) : null}
+      {alugar ? <DialogoAlugarEquipamento key={`l${chave}`} aberto={aberto === "alugar"} aoMudar={mudar("alugar")} equipamento={equipamento} empresas={empresas} /> : null}
+      {encerrarAluguel && aluguelProprio ? (
+        <DialogoEncerrarAluguel key={`x${chave}`} aberto={aberto === "encerrar"} aoMudar={mudar("encerrar")} equipamento={equipamento} aluguel={aluguelProprio} />
       ) : null}
     </>
   );
 }
 
-/** Equipamento devolvido em avaliação: registra o resultado e volta a ficar disponível. */
-function DialogoAvaliacao({ aberto, aoMudar, ativoId, rotulo }: { aberto: boolean; aoMudar: (v: boolean) => void; ativoId: string; rotulo: string }) {
+/** Equipamento em avaliação já inspecionado (e mantido em avaliação): a liberação para uso. */
+function DialogoAvaliacao({ aberto, aoMudar, ativoId, rotulo, inspecao }: { aberto: boolean; aoMudar: (v: boolean) => void; ativoId: string; rotulo: string; inspecao: string }) {
   const router = useRouter();
   const [observacao, setObservacao] = useState("");
   const [erro, setErro] = useState<string | null>(null);
@@ -147,7 +174,7 @@ function DialogoAvaliacao({ aberto, aoMudar, ativoId, rotulo }: { aberto: boolea
 
   async function confirmar() {
     if (!observacao.trim()) {
-      setErro("Registre o resultado da avaliação.");
+      setErro("Registre a observação da liberação.");
       return;
     }
     setEnviando(true);
@@ -166,10 +193,12 @@ function DialogoAvaliacao({ aberto, aoMudar, ativoId, rotulo }: { aberto: boolea
     <Dialog open={aberto} onOpenChange={(v) => !enviando && aoMudar(v)}>
       <DialogContent className={cn(MODAL_CENTRALIZADO, "w-[calc(100%-1rem)] sm:max-w-[520px]")}>
         <DialogHeader>
-          <DialogTitle>Concluir avaliação</DialogTitle>
-          <DialogDescription>{rotulo} volta a ficar disponível para novas alocações.</DialogDescription>
+          <DialogTitle>Liberar para uso</DialogTitle>
+          <DialogDescription>
+            {rotulo} volta a ficar disponível para novas alocações, com base na inspeção {inspecao}.
+          </DialogDescription>
         </DialogHeader>
-        <Campo rotulo="Resultado da avaliação" obrigatorio erro={erro ?? undefined}>
+        <Campo rotulo="Observação da liberação" obrigatorio erro={erro ?? undefined}>
           {(p) => <Textarea {...p} value={observacao} onChange={(e) => setObservacao(e.target.value)} maxLength={500} rows={3} placeholder="Ex.: testado, sem avarias" />}
         </Campo>
         <DialogFooter>

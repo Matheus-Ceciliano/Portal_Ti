@@ -1,12 +1,14 @@
 "use client";
 
-import { PlugZap } from "lucide-react";
+import { PlugZap, RotateCw, ShieldAlert } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { startTransition, useActionState, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AlertaFormulario, BotaoPendente, Campo } from "@/components/comum/campos";
 import { SelecaoPersonalizada } from "@/components/comum/selecao-personalizada";
 import { LARGURA_MODAL, MODAL_CENTRALIZADO } from "@/components/empresas/posicao-modal";
+import { anexarFotosInspecao, ChecklistInspecao, checklistVazio, inspecaoParaEnvio, ProgressoChecklist, type EstadoChecklist } from "@/components/inspecoes/checklist";
+import { focarErroChecklist } from "@/components/inspecoes/dialogos-inspecao";
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -20,14 +22,25 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { sistemaServe, type MarcaOpcao, type ModeloOpcao, type ProcessadorOpcao, type SistemaOpcao } from "@/lib/catalogos";
 import { descreverPeca, ehComponente, resumirConfiguracao, pecasDaConfiguracao, type ConfiguracaoOriginal, type TipoComponente } from "@/lib/componentes";
 import { PARTES_KIT, ROTULO_PARTE, type ParteKit } from "@/lib/identificacao";
+import {
+  alvosDaInspecaoEntrada,
+  CONDICOES_ENTRADA,
+  errosChecklist,
+  perguntasAplicaveis,
+  resultadoChecklist,
+  ROTULO_CONDICAO,
+  type CondicaoEntrada,
+  type Pergunta,
+} from "@/lib/inspecao";
 import { COM_CONFIGURACAO, nomeCarregador, normalizarIdentificador, TIPOS_FOTO, type TipoFoto } from "@/lib/inventario";
 import { cn } from "@/lib/utils";
 import { acaoPreviaIdentificador } from "@/server/acoes/categorias";
+import { acaoChecklistsDoCadastro } from "@/server/acoes/inspecoes";
 import { acaoSalvarEquipamento, type EstadoInventario } from "@/server/acoes/inventario";
 import type { CatalogoInventario } from "@/server/modulos/categorias";
 import type { FichaEquipamento } from "@/server/modulos/inventario";
@@ -56,26 +69,6 @@ export type EmpresaOpcaoInventario = { id: string; nome: string; sigla: string; 
 /** Categorias e Catálogos do Inventário (marcas, modelos, processadores, sistemas e memórias). */
 export type CatalogoCadastro = CatalogoInventario;
 
-type Aba = "gerais" | "configuracao" | "fotos" | "adicionais";
-/** Aba de cada campo (edição): o erro leva à aba certa. */
-const ABA_DO_CAMPO: Record<string, Aba> = {
-  processadorId: "configuracao",
-  sistemaOperacionalId: "configuracao",
-  memoriaRam: "configuracao",
-  armazenamento: "configuracao",
-  ssdGb: "configuracao",
-  hdGb: "configuracao",
-  capacidadeGb: "configuracao",
-  tecnologia: "configuracao",
-  interfaceConexao: "configuracao",
-  formato: "configuracao",
-  frequenciaMhz: "configuracao",
-  fotos: "fotos",
-  dataAquisicao: "adicionais",
-  garantiaAte: "adicionais",
-  observacoes: "adicionais",
-};
-
 function Secao({ titulo, children, className }: { titulo: string; children: React.ReactNode; className?: string }) {
   return (
     <fieldset className={cn("min-w-0 border-t pt-4 first:border-t-0 first:pt-0", className)}>
@@ -85,14 +78,28 @@ function Secao({ titulo, children, className }: { titulo: string; children: Reac
   );
 }
 
-/** Conteúdo de uma aba da edição: grade sem divisórias. */
-const Grade = ({ children }: { children: React.ReactNode }) => <div className="grid gap-x-5 gap-y-4 sm:grid-cols-2 lg:grid-cols-12">{children}</div>;
+/** Valor só de leitura (edição) com a altura e o contorno dos campos ao lado, em fundo neutro. */
+function Leitura({ id, children, extra, titulo }: { id: string; children: React.ReactNode; extra?: React.ReactNode; titulo?: string }) {
+  return (
+    <p
+      id={id}
+      title={titulo}
+      className="flex h-11 min-w-0 items-center gap-2 rounded-lg border border-input bg-muted/60 px-3.5 text-base font-semibold text-titulo md:text-sm lg:h-10"
+    >
+      <span className="min-w-0 flex-1 truncate">{children}</span>
+      {extra ? <span className="shrink-0 text-[12px] font-medium text-muted-foreground">{extra}</span> : null}
+    </p>
+  );
+}
 
-const Leitura = ({ id, children, className }: { id: string; children: React.ReactNode; className?: string }) => (
-  <p id={id} className={cn("flex h-10 items-center truncate font-semibold text-titulo", className)}>
-    {children}
-  </p>
-);
+/** Leva ao primeiro campo com erro: as seções podem estar fora da área visível. */
+function focarPrimeiroErro(corpo: React.RefObject<HTMLDivElement | null>) {
+  requestAnimationFrame(() => {
+    const campo = corpo.current?.querySelector<HTMLElement>('[aria-invalid="true"]');
+    // Grupo de opções (ex.: condição de entrada): o foco vai para a primeira opção.
+    (campo?.matches("input, textarea, button, [tabindex]") ? campo : (campo?.querySelector<HTMLElement>("button, input") ?? campo))?.focus();
+  });
+}
 
 type Partes = Record<ParteKit, { marcada: boolean; serie: string }>;
 const partesIniciais = (): Partes => ({ TECLADO: { marcada: true, serie: "" }, MOUSE: { marcada: true, serie: "" }, RECEPTOR: { marcada: false, serie: "" } });
@@ -126,7 +133,9 @@ const incluir = <T extends { id: string }>(lista: T[], item: T) => [...lista.fil
  * modelo do processador e sistema operacional são selects pesquisáveis com "+ Criar novo".
  * O identificador é automático (NBI5001, MNT001, KTM01.T...): o formulário mostra uma
  * prévia, que não reserva número. No notebook, o código do processador (i5 → 5) entra no
- * nome e o carregador C1 nasce junto. O cadastro passa por revisão; a edição usa abas.
+ * nome e o carregador C1 nasce junto. Cadastro e edição usam as mesmas seções; só o
+ * cadastro passa por revisão, com a inspeção de entrada de cada equipamento criado (novo ou
+ * usado define os testes; nenhuma resposta é marcada sozinha).
  */
 export function DialogoEquipamento({
   aberto,
@@ -162,12 +171,21 @@ export function DialogoEquipamento({
   const [fotosPartes, setFotosPartes] = useState<Partial<Record<ParteKit, FotosSelecionadas>>>({});
   const [previa, setPrevia] = useState<{ chave: string; nome: string; partes: string[] } | null>(null);
   const [etapa, setEtapa] = useState<"preencher" | "revisar">("preencher");
-  const [aba, setAba] = useState<Aba>("gerais");
   const [chave] = useState(() => crypto.randomUUID());
   const [alterado, setAlterado] = useState(false);
   const [confirmarDescarte, setConfirmarDescarte] = useState(false);
   const [errosLocais, setErrosLocais] = useState<Record<string, string>>({});
+  const [condicao, setCondicao] = useState<CondicaoEntrada | "">("");
+  const [inspecoes, setInspecoes] = useState<Record<string, EstadoChecklist>>({});
+  const [errosInspecao, setErrosInspecao] = useState<Record<string, Record<string, string>>>({});
+  const [checklists, setChecklists] = useState<{ chave: string; dados: { principal: Pergunta[]; herdado: boolean; carregador: Pergunta[] | null } | null; erro: string | null }>({
+    chave: "",
+    dados: null,
+    erro: null,
+  });
+  const [tentativaChecklist, setTentativaChecklist] = useState(0);
   const tratado = useRef<EstadoInventario | null>(null);
+  const corpo = useRef<HTMLDivElement>(null);
 
   const limparErros = (campos: string[]) => setErrosLocais((e) => Object.fromEntries(Object.entries(e).filter(([k]) => !campos.includes(k))));
   const mudar = (parcial: Partial<typeof f>) => {
@@ -206,6 +224,31 @@ export function DialogoEquipamento({
   const processador = processadores.find((p) => p.id === f.processadorId) ?? null;
   const prefixoNotebook = categorias.find((c) => c.regra === "PROCESSADOR")?.prefixo ?? "NBI";
   const semCodigo = notebook && Boolean(processador) && !processador?.codigo;
+  // Checklists vigentes da inspeção de entrada, lidos na revisão (a TI pode ter mudado as perguntas).
+  const chaveChecklist = !edicao && etapa === "revisar" && f.categoriaId ? `${f.categoriaId}:${tentativaChecklist}` : "";
+  useEffect(() => {
+    if (!chaveChecklist) return;
+    let vivo = true;
+    acaoChecklistsDoCadastro(chaveChecklist.split(":")[0])
+      .then((r) => vivo && setChecklists({ chave: chaveChecklist, dados: r.ok ? r.dados : null, erro: r.ok ? null : r.erro }))
+      .catch(() => vivo && setChecklists({ chave: chaveChecklist, dados: null, erro: "Não foi possível carregar o checklist. Tente novamente." }));
+    return () => {
+      vivo = false;
+    };
+  }, [chaveChecklist]);
+  const checklistAtual = checklists.chave === chaveChecklist ? checklists : null;
+  // Inspeção de entrada: um checklist por equipamento criado (notebook + C1; kit: cada peça).
+  const alvos =
+    !edicao && tipo && checklistAtual?.dados
+      ? alvosDaInspecaoEntrada(tipo, categoria?.nome ?? "", partesMarcadas).map((a) => ({
+          ...a,
+          perguntas: perguntasAplicaveis((a.fonte === "carregador" ? checklistAtual.dados!.carregador : checklistAtual.dados!.principal) ?? [], {
+            tipo: "ENTRADA",
+            condicao: condicao || null,
+            parte: a.parte,
+          }),
+        }))
+      : [];
 
   // Prévia do identificador (cadastro). Guardada com a chave da consulta: muda de categoria,
   // processador (ou o código dele) ou peças → só aparece a prévia da combinação atual.
@@ -234,14 +277,16 @@ export function DialogoEquipamento({
     aoMudar(false);
     aoSalvar?.(id);
   }, [estado, edicao, aoMudar, aoSalvar, router]);
-  // Erro do servidor: volta ao formulário (cadastro) ou à aba do campo (edição).
+  // Erro do servidor: volta da revisão ao formulário, no primeiro campo com erro.
   const [estadoVisto, setEstadoVisto] = useState(estado);
   if (estado !== estadoVisto) {
     setEstadoVisto(estado);
-    if ((estado.erro || estado.erros) && etapa === "revisar") setEtapa("preencher");
-    const campo = Object.keys(estado.erros ?? {})[0];
-    if (edicao && campo) setAba(ABA_DO_CAMPO[campo] ?? "gerais");
+    // Erro da inspeção fica na revisão, junto do checklist.
+    if ((estado.erro || estado.erros) && etapa === "revisar" && !estado.erros?.inspecao) setEtapa("preencher");
   }
+  useEffect(() => {
+    if (estado.erros) focarPrimeiroErro(corpo);
+  }, [estado]);
 
   function validar() {
     const erros: Record<string, string> = {};
@@ -250,6 +295,7 @@ export function DialogoEquipamento({
       erros.patrimonio = "Informe o patrimônio ou o nome do dispositivo.";
     }
     if (!f.empresaId) erros.empresaId = "Selecione a empresa proprietária.";
+    if (!edicao && !condicao) erros.condicaoEntrada = "Informe se o equipamento entra novo ou usado.";
     if (!f.marcaId) erros.marcaId = "Selecione a marca.";
     if (!f.modeloId && !carregador) erros.modeloId = "Selecione o modelo.";
     // Notebook: o processador define o identificador; edição de cadastro antigo sem processador continua possível.
@@ -260,12 +306,10 @@ export function DialogoEquipamento({
     if (f.dataAquisicao && f.garantiaAte && f.garantiaAte < f.dataAquisicao) erros.garantiaAte = "A garantia termina antes da aquisição.";
     if (configEditavel) Object.assign(erros, errosConfiguracao(f.config));
     setErrosLocais(erros);
-    const primeiro = Object.keys(erros)[0];
-    if (edicao && primeiro) setAba(ABA_DO_CAMPO[primeiro] ?? "gerais");
-    return !primeiro;
+    return !Object.keys(erros).length;
   }
 
-  /** O envio é montado do estado (abas e revisão escondem campos). */
+  /** O envio é montado do estado (a revisão esconde os campos). */
   function montarEnvio() {
     const dados = new FormData();
     if (equipamento) dados.set("id", equipamento.id);
@@ -296,16 +340,37 @@ export function DialogoEquipamento({
       anexarFotos(dados, fotos);
     }
     for (const id of fotosRemovidas) dados.append("removerFoto", id);
+    if (!edicao) {
+      dados.set("condicaoEntrada", condicao);
+      dados.set("inspecoes", JSON.stringify(Object.fromEntries(alvos.map((a) => [a.alvo, inspecaoParaEnvio(a.perguntas, inspecoes[a.alvo] ?? checklistVazio())]))));
+      for (const a of alvos) anexarFotosInspecao(dados, a.alvo, a.perguntas, inspecoes[a.alvo] ?? checklistVazio());
+    }
     return dados;
   }
 
   function enviar(evento: React.FormEvent<HTMLFormElement>) {
     evento.preventDefault();
-    if (pendente || !validar()) return;
+    if (pendente) return;
+    if (!validar()) {
+      focarPrimeiroErro(corpo);
+      return;
+    }
     // Cadastro: revisar antes de confirmar.
     if (!edicao && etapa === "preencher") {
       setEtapa("revisar");
       return;
+    }
+    // Na revisão, a inspeção de entrada completa de cada equipamento criado.
+    if (!edicao) {
+      if (!checklistAtual?.dados) return;
+      const e = Object.fromEntries(
+        alvos.map((a) => [a.alvo, errosChecklist(a.perguntas, (inspecoes[a.alvo] ?? checklistVazio()).respostas)] as const).filter(([, x]) => Object.keys(x).length),
+      );
+      setErrosInspecao(e);
+      if (Object.keys(e).length) {
+        focarErroChecklist(corpo.current);
+        return;
+      }
     }
     const dados = montarEnvio();
     startTransition(() => despachar(dados));
@@ -318,7 +383,6 @@ export function DialogoEquipamento({
     else aoMudar(false);
   };
   const erro = (campo: string) => errosLocais[campo] ?? estado.erros?.[campo];
-  const erroNaAba = (a: Aba) => Object.keys({ ...estado.erros, ...errosLocais }).some((k) => (ABA_DO_CAMPO[k] ?? "gerais") === a);
   const opcoesEmpresas = empresas.filter((e) => e.ativa || e.id === f.empresaId).map((e) => ({ valor: e.id, rotulo: e.nome }));
   // Todas as categorias ativas (equipamentos, peças internas e kits) no mesmo select; carregador nasce do notebook.
   const disponiveis = categorias.filter((c) => (c.ativa && c.regra !== "CARREGADOR") || c.id === f.categoriaId);
@@ -345,7 +409,7 @@ export function DialogoEquipamento({
     return c ? resumirConfiguracao(pecasDaConfiguracao({ memoria: c.memoria && { capacidadeGb: Number(c.memoria.capacidadeGb), tecnologia: c.memoria.tecnologia }, armazenamento: c.armazenamento.map((a) => ({ ...a, capacidadeGb: Number(a.capacidadeGb) })) } as ConfiguracaoOriginal)).texto : null;
   })();
 
-  /* Blocos de campos (cadastro em seções; edição em abas) */
+  /* Blocos de campos (as mesmas seções no cadastro e na edição) */
 
   function trocarCategoria(v: string) {
     if (v === CRIAR) return setCriando("categoria");
@@ -365,7 +429,9 @@ export function DialogoEquipamento({
     <Campo rotulo="Categoria" obrigatorio={!edicao} erro={erro("categoria")} className="lg:col-span-3">
       {(p) =>
         edicao ? (
-          <Leitura id={p.id}>{equipamento!.rotuloTipo}</Leitura>
+          <Leitura id={p.id} titulo={equipamento!.rotuloTipo}>
+            {equipamento!.rotuloTipo}
+          </Leitura>
         ) : (
           <SelecaoPersonalizada
             id={p.id}
@@ -399,7 +465,6 @@ export function DialogoEquipamento({
     ) : (
       <Campo
         rotulo={kit ? "Kit" : edicao ? "Nome do dispositivo" : "Identificação"}
-        etiqueta={edicao && identificacao ? <span className="text-[12px] text-muted-foreground">Automático</span> : undefined}
         ajuda={
           notebook && identificacao ? (
             <span className="inline-flex items-center gap-1">
@@ -409,14 +474,22 @@ export function DialogoEquipamento({
         }
         className="lg:col-span-3"
       >
-        {(p) => (
-          <p id={p.id} className="tabular flex h-10 items-center gap-2 font-semibold text-titulo" data-testid="identificacao-automatica">
-            {identificacao ?? (
-              <span className="font-normal text-muted-foreground">{categoria ? (notebook ? (semCodigo ? "Processador sem código" : "Selecione o processador") : "Gerada ao salvar") : "—"}</span>
-            )}
-            {identificacao && !edicao ? <span className="text-[12px] font-medium text-muted-foreground">prévia</span> : null}
-          </p>
-        )}
+        {(p) =>
+          edicao ? (
+            <Leitura id={p.id} extra={identificacao ? "Automático" : undefined}>
+              <span className="tabular" data-testid="identificacao-automatica">
+                {identificacao ?? <span className="font-normal text-muted-foreground">Sem identificação automática</span>}
+              </span>
+            </Leitura>
+          ) : (
+            <p id={p.id} className="tabular flex h-10 items-center gap-2 font-semibold text-titulo" data-testid="identificacao-automatica">
+              {identificacao ?? (
+                <span className="font-normal text-muted-foreground">{categoria ? (notebook ? (semCodigo ? "Processador sem código" : "Selecione o processador") : "Gerada ao salvar") : "—"}</span>
+              )}
+              {identificacao ? <span className="text-[12px] font-medium text-muted-foreground">prévia</span> : null}
+            </p>
+          )
+        }
       </Campo>
     );
 
@@ -448,7 +521,9 @@ export function DialogoEquipamento({
     >
       {(p) =>
         equipamento ? (
-          <Leitura id={p.id}>{equipamento.empresa.nome}</Leitura>
+          <Leitura id={p.id} titulo={equipamento.empresa.nome}>
+            {equipamento.empresa.nome}
+          </Leitura>
         ) : (
           <SelecaoPersonalizada
             id={p.id}
@@ -460,6 +535,52 @@ export function DialogoEquipamento({
             placeholder="Selecione a empresa"
             pesquisavel
           />
+        )
+      }
+    </Campo>
+  );
+
+  const campoCondicao = (
+    <Campo
+      rotulo="Condição de entrada"
+      obrigatorio={!edicao}
+      erro={erro("condicaoEntrada")}
+      ajuda={!edicao && condicao === "NOVO" ? "Novo: a inspeção não inclui os testes de equipamento usado." : undefined}
+      className="lg:col-span-3"
+    >
+      {(p) =>
+        edicao ? (
+          <Leitura id={p.id}>{equipamento!.condicaoEntrada ? ROTULO_CONDICAO[equipamento!.condicaoEntrada] : "Não registrada"}</Leitura>
+        ) : (
+          <div
+            id={p.id}
+            role="radiogroup"
+            aria-label="Condição de entrada"
+            aria-describedby={p["aria-describedby"]}
+            aria-invalid={p["aria-invalid"]}
+            className={cn("grid h-11 grid-cols-2 gap-1 rounded-lg bg-muted p-1 lg:h-10", p["aria-invalid"] && "ring-2 ring-erro/40")}
+            data-testid="condicao-entrada"
+          >
+            {CONDICOES_ENTRADA.map((c) => (
+              <button
+                key={c}
+                type="button"
+                role="radio"
+                aria-checked={condicao === c}
+                onClick={() => {
+                  setCondicao(c);
+                  setAlterado(true);
+                  limparErros(["condicaoEntrada"]);
+                }}
+                className={cn(
+                  "rounded-md px-2 text-[13px] font-semibold transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
+                  condicao === c ? "bg-card text-titulo shadow-nivel-1 dark:ring-1 dark:ring-white/10" : "text-muted-foreground hover:text-titulo",
+                )}
+              >
+                {ROTULO_CONDICAO[c]}
+              </button>
+            ))}
+          </div>
         )
       }
     </Campo>
@@ -565,9 +686,9 @@ export function DialogoEquipamento({
       ) : (
         <Campo rotulo="Memória e armazenamento" ajuda="Atualizados pelos componentes internos, na ficha." className="sm:col-span-2 lg:col-span-6">
           {(p) => (
-            <p id={p.id} className="flex min-h-10 items-center font-semibold text-titulo">
+            <Leitura id={p.id} titulo={equipamento?.componentesInternos?.resumo.texto}>
               {equipamento?.componentesInternos?.resumo.texto}
-            </p>
+            </Leitura>
           )}
         </Campo>
       )}
@@ -598,8 +719,8 @@ export function DialogoEquipamento({
         <Campo rotulo="Garantia até" erro={erro("garantiaAte")} className="lg:col-span-3">
           {(p) => <Input {...p} type="date" value={f.garantiaAte} onChange={(e) => mudar({ garantiaAte: e.target.value })} />}
         </Campo>
-        <Campo rotulo="Observações" erro={erro("observacoes")} className={cn("sm:col-span-2", edicao ? "lg:col-span-12" : "lg:col-span-6")}>
-          {(p) => <Textarea {...p} value={f.observacoes} onChange={(e) => mudar({ observacoes: e.target.value })} rows={edicao ? 4 : 2} className="min-h-10" />}
+        <Campo rotulo="Observações" erro={erro("observacoes")} className="sm:col-span-2 lg:col-span-6">
+          {(p) => <Textarea {...p} value={f.observacoes} onChange={(e) => mudar({ observacoes: e.target.value })} rows={2} className="min-h-10" />}
         </Campo>
       </>
     );
@@ -676,12 +797,6 @@ export function DialogoEquipamento({
     const x = lista.find((i) => i.id === id);
     return x ? rotulo(x) : "";
   };
-  const abas: { id: Aba; rotulo: string }[] = [
-    { id: "gerais", rotulo: "Dados gerais" },
-    ...(configuracao || componente ? [{ id: "configuracao" as const, rotulo: componente ? "Especificação" : "Configuração" }] : []),
-    { id: "fotos", rotulo: "Fotos" },
-    { id: "adicionais", rotulo: "Informações adicionais" },
-  ];
 
   return (
     <>
@@ -690,11 +805,16 @@ export function DialogoEquipamento({
           className={cn(
             MODAL_CENTRALIZADO,
             "flex max-h-[calc(100dvh-2rem)] flex-col gap-0 overflow-hidden p-0",
-            // Edição: altura fixa (as abas não fazem o modal pular) e rolagem só no conteúdo.
-            edicao ? cn(LARGURA_MODAL[900], "h-[min(680px,calc(100dvh-2rem))]") : LARGURA_MODAL[1050],
+            LARGURA_MODAL[1050],
           )}
           data-testid="dialogo-equipamento"
           onInteractOutside={(e) => e.preventDefault()}
+          // Edição: o foco fica no modal, sem selecionar o primeiro campo (digitar não apaga o valor por engano).
+          onOpenAutoFocus={(e) => {
+            if (!edicao) return;
+            e.preventDefault();
+            (e.target as HTMLElement | null)?.focus();
+          }}
         >
           <DialogHeader className="shrink-0 border-b px-6 pt-5 pr-14 pb-4">
             <DialogTitle>{etapa === "revisar" ? "Revisar cadastro" : titulo}</DialogTitle>
@@ -702,60 +822,15 @@ export function DialogoEquipamento({
           </DialogHeader>
 
           <form onSubmit={enviar} noValidate className="flex min-h-0 flex-1 flex-col">
-            {edicao ? (
-              <Tabs value={aba} onValueChange={(v) => setAba(v as Aba)} className="flex min-h-0 flex-1 flex-col gap-0">
-                <div className="shrink-0 border-b px-6 py-2.5">
-                  <TabsList aria-label="Seções do equipamento" className="h-auto w-full flex-nowrap justify-start overflow-x-auto [scrollbar-width:none] sm:w-fit [&::-webkit-scrollbar]:hidden">
-                    {abas.map((a) => (
-                      <TabsTrigger key={a.id} value={a.id} className="flex-none">
-                        {a.rotulo}
-                        {erroNaAba(a.id) ? <span className="size-1.5 rounded-full bg-erro" aria-label="(com erro)" /> : null}
-                        {a.id === "fotos" && equipamento ? (
-                          <span className="tabular rounded-md bg-muted px-1.5 text-[11px] leading-5 text-muted-foreground">
-                            {equipamento.fotos.filter((x) => x.contexto === "CADASTRO").length - fotosRemovidas.length + totalFotos(fotos)}
-                          </span>
-                        ) : null}
-                      </TabsTrigger>
-                    ))}
-                  </TabsList>
+            <div ref={corpo} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-5" data-testid="corpo-formulario-equipamento">
+              {estado.erro ? (
+                <div className="mb-4">
+                  <AlertaFormulario tom="erro">{estado.erro}</AlertaFormulario>
                 </div>
-                <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-5" data-testid="corpo-formulario-equipamento">
-                  {estado.erro ? (
-                    <div className="mb-4">
-                      <AlertaFormulario tom="erro">{estado.erro}</AlertaFormulario>
-                    </div>
-                  ) : null}
-                  <TabsContent value="gerais">
-                    <Grade>
-                      {campoCategoria}
-                      {campoIdentificacao}
-                      {campoPatrimonio}
-                      {campoEmpresa}
-                      {camposFabricante}
-                    </Grade>
-                  </TabsContent>
-                  {configuracao || componente ? (
-                    <TabsContent value="configuracao">
-                      <Grade>{camposConfiguracao}</Grade>
-                    </TabsContent>
-                  ) : null}
-                  <TabsContent value="fotos">
-                    <Grade>{campoFotos}</Grade>
-                  </TabsContent>
-                  <TabsContent value="adicionais">
-                    <Grade>{camposAdicionais}</Grade>
-                  </TabsContent>
-                </div>
-              </Tabs>
-            ) : (
-              <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-5" data-testid="corpo-formulario-equipamento">
-                {estado.erro ? (
-                  <div className="mb-4">
-                    <AlertaFormulario tom="erro">{estado.erro}</AlertaFormulario>
-                  </div>
-                ) : null}
+              ) : null}
 
-                {etapa === "revisar" ? (
+              {etapa === "revisar" ? (
+                <div className="flex flex-col gap-6">
                   <Revisao
                     itens={[
                       ["Categoria", categoria?.nome ?? ""],
@@ -768,6 +843,7 @@ export function DialogoEquipamento({
                           ] as [string, string][])
                         : []),
                       ["Empresa proprietária", empresas.find((e) => e.id === f.empresaId)?.nome ?? ""],
+                      ["Condição de entrada", condicao ? ROTULO_CONDICAO[condicao] : ""],
                       ["Marca / modelo", `${nomeDe(marcas, f.marcaId, (m) => m.nome)} ${nomeDe(modelos, f.modeloId, (m) => m.nome)}`],
                       ...(!kit && f.numeroSerie ? ([["Número de série", f.numeroSerie.toUpperCase()]] as [string, string][]) : []),
                       ...(f.patrimonio && !componente && !kit ? ([["Patrimônio", f.patrimonio.toUpperCase()]] as [string, string][]) : []),
@@ -789,23 +865,92 @@ export function DialogoEquipamento({
                       ["Fotos", String(totalFotosEnvio)],
                     ]}
                   />
-                ) : (
-                  <div className="flex flex-col gap-5">
-                    <Secao titulo="Identificação">
-                      {campoCategoria}
-                      {campoIdentificacao}
-                      {campoPatrimonio}
-                      {campoEmpresa}
-                    </Secao>
-                    <Secao titulo="Fabricante">{camposFabricante}</Secao>
-                    {kit ? <Secao titulo="Peças do kit">{pecasKit}</Secao> : null}
-                    {camposConfiguracao ? <Secao titulo={componente ? "Especificação" : "Configuração"}>{camposConfiguracao}</Secao> : null}
-                    <Secao titulo={componente || kit ? "Observações" : "Aquisição e observações"}>{camposAdicionais}</Secao>
-                    {kit ? null : <Secao titulo="Fotos">{campoFotos}</Secao>}
-                  </div>
-                )}
-              </div>
-            )}
+                  <section aria-labelledby="titulo-inspecao-entrada" className="flex flex-col gap-4" data-testid="inspecao-entrada">
+                    <div className="flex flex-col gap-0.5">
+                      <h3 id="titulo-inspecao-entrada" className="text-sm font-bold text-titulo">
+                        Inspeção de entrada
+                      </h3>
+                      <p className="text-[12.5px] text-muted-foreground">
+                        {condicao === "NOVO"
+                          ? "Equipamento novo: verificação inicial, sem os testes que só valem para equipamento usado."
+                          : "Equipamento usado: inspeção técnica completa antes de concluir o cadastro."}{" "}
+                        Responda cada item; nenhuma resposta é marcada automaticamente.
+                      </p>
+                    </div>
+                    {estado.erros?.inspecao ? <AlertaFormulario tom="erro">{estado.erros.inspecao}</AlertaFormulario> : null}
+                    {checklistAtual?.erro ? (
+                      <div className="flex flex-col items-start gap-2">
+                        <AlertaFormulario tom="erro">{checklistAtual.erro}</AlertaFormulario>
+                        <Button type="button" variant="secondary" size="sm" onClick={() => setTentativaChecklist((t) => t + 1)}>
+                          <RotateCw aria-hidden /> Tentar novamente
+                        </Button>
+                      </div>
+                    ) : !checklistAtual?.dados ? (
+                      <div className="flex flex-col gap-2" aria-busy="true" aria-label="Carregando o checklist">
+                        <Skeleton className="h-6 w-48 rounded-md" />
+                        <Skeleton className="h-16 rounded-xl" />
+                        <Skeleton className="h-16 rounded-xl" />
+                      </div>
+                    ) : checklistAtual.dados.herdado ? (
+                      <p className="text-[12.5px] text-muted-foreground">Esta categoria ainda não tem checklist próprio: vale o checklist de Outro.</p>
+                    ) : null}
+                    {alvos.map((a) => {
+                      const valor = inspecoes[a.alvo] ?? checklistVazio();
+                      return (
+                        <div key={a.alvo} className="flex flex-col gap-3" data-alvo={a.alvo}>
+                          {alvos.length > 1 ? <h4 className="text-[13.5px] font-semibold text-titulo">{a.titulo}</h4> : null}
+                          <ProgressoChecklist perguntas={a.perguntas} valor={valor} />
+                          {resultadoChecklist(a.perguntas, valor.respostas) === "INAPTO" ? (
+                            <p className="flex items-start gap-1.5 rounded-lg bg-erro-fundo px-3 py-2 text-[12.5px] font-medium text-erro">
+                              <ShieldAlert className="mt-px size-3.5 shrink-0" aria-hidden />
+                              Defeito bloqueante: o equipamento será cadastrado e entrará em manutenção, sem ficar disponível.
+                            </p>
+                          ) : null}
+                          <ChecklistInspecao
+                            perguntas={a.perguntas}
+                            valor={valor}
+                            aoMudar={(v) => {
+                              setInspecoes((x) => ({ ...x, [a.alvo]: v }));
+                              setAlterado(true);
+                              if (errosInspecao[a.alvo]) setErrosInspecao((x) => ({ ...x, [a.alvo]: errosChecklist(a.perguntas, v.respostas) }));
+                            }}
+                            erros={errosInspecao[a.alvo]}
+                            desabilitado={pendente}
+                          />
+                          <Campo rotulo="Observações da inspeção">
+                            {(p) => (
+                              <Textarea
+                                {...p}
+                                value={valor.observacoes}
+                                onChange={(e) => setInspecoes((x) => ({ ...x, [a.alvo]: { ...valor, observacoes: e.target.value } }))}
+                                maxLength={1000}
+                                rows={2}
+                                className="min-h-10"
+                              />
+                            )}
+                          </Campo>
+                        </div>
+                      );
+                    })}
+                  </section>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-5">
+                  <Secao titulo="Identificação">
+                    {campoCategoria}
+                    {campoIdentificacao}
+                    {campoPatrimonio}
+                    {campoEmpresa}
+                    {campoCondicao}
+                  </Secao>
+                  <Secao titulo="Fabricante">{camposFabricante}</Secao>
+                  {kit ? <Secao titulo="Peças do kit">{pecasKit}</Secao> : null}
+                  {camposConfiguracao ? <Secao titulo={componente ? "Especificação" : "Configuração"}>{camposConfiguracao}</Secao> : null}
+                  <Secao titulo={componente || kit || parteDeKit ? "Observações" : "Aquisição e observações"}>{camposAdicionais}</Secao>
+                  {kit ? null : <Secao titulo="Fotos">{campoFotos}</Secao>}
+                </div>
+              )}
+            </div>
 
             <DialogFooter className="mx-0 mb-0 shrink-0">
               {etapa === "revisar" ? (

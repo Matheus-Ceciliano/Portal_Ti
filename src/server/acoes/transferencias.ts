@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { obterSessao } from "@/server/auth/sessao";
+import { resumoTerDaEntrega } from "@/lib/ter";
 import { mensagemDeErro } from "@/server/authz/exigir";
 import {
   cancelarTransferencia,
@@ -12,6 +13,7 @@ import {
   transferirEmpresa,
   type ColaboradorTransferencia,
 } from "@/server/modulos/transferencias";
+import { lerVerificacoes } from "./inspecao-formulario";
 
 export type Resultado = { ok: true; mensagem: string } | { ok: false; erro: string };
 
@@ -27,6 +29,7 @@ function atualizarTelas(ativoId: string) {
   revalidatePath("/ti/inventario");
   revalidatePath("/ti/alocacoes");
   revalidatePath(`/ti/inventario/${ativoId}`);
+  revalidatePath("/ti/documentos/ter");
 }
 
 export async function acaoColaboradoresTransferencia(): Promise<{ ok: true; dados: ColaboradorTransferencia[] } | { ok: false; erro: string }> {
@@ -48,18 +51,22 @@ const esquemaColaborador = z.object({
   confirmacaoFisica: z.boolean().optional(),
   alocacaoAtualId: z.string().max(40).nullable(),
   chaveRequisicao: z.uuid().optional(),
+  /** Entrega física: verificação técnica de cada item (as fotos das inspeções novas vêm em `anexos`). */
+  verificacoes: z.unknown().optional(),
 });
 
-export async function acaoTransferirColaborador(entrada: z.input<typeof esquemaColaborador>): Promise<Resultado> {
+export async function acaoTransferirColaborador(entrada: z.input<typeof esquemaColaborador>, anexos?: FormData): Promise<Resultado> {
   const ator = await atorAtual();
   if (!ator) return { ok: false, erro: SESSAO };
   const dados = esquemaColaborador.safeParse(entrada);
   if (!dados.success) return { ok: false, erro: DADOS };
   try {
-    const r = await transferirColaborador(ator, dados.data);
+    const verificacoes = await lerVerificacoes(dados.data.verificacoes, anexos);
+    if (!verificacoes) return { ok: false, erro: "Revise a verificação técnica dos equipamentos." };
+    const r = await transferirColaborador(ator, { ...dados.data, verificacoes });
     atualizarTelas(dados.data.ativoId);
     const mensagem = {
-      CONCLUIDA: `Transferido para ${r.colaborador}${r.numero ? ` (${r.numero})` : ""}.`,
+      CONCLUIDA: `Transferido para ${r.colaborador}${r.numero ? ` (${r.numero})` : ""}.${resumoTerDaEntrega(r.ter)}`,
       RESERVADA: `Transferência para ${r.colaborador} reservada. A custódia atual continua até a entrega física.`,
       ALOCADO: `Entregue a ${r.colaborador}${r.numero ? ` (${r.numero})` : ""}.`,
       RESERVADO: `Reservado para ${r.colaborador}${r.numero ? ` (${r.numero})` : ""}.`,
@@ -75,17 +82,20 @@ const esquemaConfirmacao = z.object({
   transferenciaId: z.uuid(),
   data: z.string().max(40).nullable().optional(),
   confirmacaoFisica: z.boolean(),
+  verificacoes: z.unknown().optional(),
 });
 
-export async function acaoConfirmarTransferencia(entrada: z.input<typeof esquemaConfirmacao>): Promise<Resultado> {
+export async function acaoConfirmarTransferencia(entrada: z.input<typeof esquemaConfirmacao>, anexos?: FormData): Promise<Resultado> {
   const ator = await atorAtual();
   if (!ator) return { ok: false, erro: SESSAO };
   const dados = esquemaConfirmacao.safeParse(entrada);
   if (!dados.success) return { ok: false, erro: DADOS };
   try {
-    const r = await confirmarTransferencia(ator, dados.data);
+    const verificacoes = await lerVerificacoes(dados.data.verificacoes, anexos);
+    if (!verificacoes) return { ok: false, erro: "Revise a verificação técnica dos equipamentos." };
+    const r = await confirmarTransferencia(ator, { ...dados.data, verificacoes });
     atualizarTelas(dados.data.ativoId);
-    return { ok: true, mensagem: `Transferido para ${r.colaborador} (${r.numero}).` };
+    return { ok: true, mensagem: `Transferido para ${r.colaborador} (${r.numero}).${resumoTerDaEntrega(r.ter)}` };
   } catch (erro) {
     return { ok: false, erro: mensagemDeErro(erro) };
   }

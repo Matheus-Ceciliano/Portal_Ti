@@ -7,6 +7,7 @@ import { FORA_DE_EQUIPAMENTOS } from "@/lib/inventario";
 import { nomeDaPessoa } from "@/server/dados-ficticios/cadastros";
 import { CHAMADOS, TUTORIAIS } from "@/server/dados-ficticios/operacao";
 import { prisma } from "@/server/db";
+import { listarMeusTers } from "./ter-colaborador";
 import { listarMeusDocumentos } from "./termos";
 import { rotuloTipo, SELECAO_TIPO } from "./inventario-base";
 
@@ -207,12 +208,13 @@ export async function obterPainelTi(ator: Ator) {
 export async function obterPainelColaborador(ator: Ator) {
   return executarCasoDeUso(ator, async () => {
     exigirPermissao(ator, "portal.acessar");
-    const [equipamentos, chamados, documentos, tutoriais] = await Promise.all([
+    const [equipamentos, chamados, documentos, termos, tutoriais] = await Promise.all([
       listarMeusEquipamentos(ator),
       listarMeusChamados(ator),
       listarMeusDocumentos(ator),
+      listarMeusTers(ator),
       listarTutoriais(ator),
     ]);
-    return { equipamentos, chamados, documentos, tutoriais: tutoriais.slice(0, 3) };
+    return { equipamentos, chamados, documentos, termos, tutoriais: tutoriais.slice(0, 3) };
   });
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckCircle2, FileCheck2, FileText, FileUp, Info, PackageCheck, RotateCw, Undo2, UserRound, XCircle } from "lucide-react";
+import { ArrowLeftRight, CheckCircle2, ClipboardCheck, FileCheck2, FileText, Info, PackageCheck, RotateCw, Undo2, UserRound, XCircle } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
@@ -9,6 +9,10 @@ import { AlertaFormulario, Campo } from "@/components/comum/campos";
 import { formatarData } from "@/components/comum/pagina";
 import { Estado, StatusBadge } from "@/components/comum/status-badge";
 import { LARGURA_MODAL, MODAL_CENTRALIZADO } from "@/components/empresas/posicao-modal";
+import { ResultadoInspecaoBadge } from "@/components/inspecoes/checklist";
+import { DialogoAvaliacaoTecnica, DialogoDetalhesInspecao, exibirInstantaneo, type EquipamentoAvaliacao, type InspecaoExibida } from "@/components/inspecoes/dialogos-inspecao";
+import { errosVerificacao, montarVerificacoes, useCondicoesEntrega, VerificacaoCondicoes, type Decisoes } from "@/components/inspecoes/verificacao-entrega";
+import { AvisoTransferenciaReservada, type EquipamentoTransferencia } from "@/components/inventario/ficha/dialogos-transferencia";
 import { BadgeTer, formatarDataHora, agoraLocal, localParaIso, MiniaturaEquipamento } from "@/components/inventario/visual";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -18,12 +22,40 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { ROTULO_DESTINO_DEVOLUCAO, ROTULO_ESTADO_FISICO, ROTULO_MOVIMENTACAO, ROTULO_SITUACAO, type Situacao } from "@/lib/inventario";
 import { cn } from "@/lib/utils";
-import { acaoCancelarReserva, acaoConfirmarEntrega, acaoDetalheAlocacao, acaoRegistrarTerAssinado } from "@/server/acoes/alocacoes";
+import { acaoCancelarReserva, acaoConfirmarEntrega, acaoDetalheAlocacao } from "@/server/acoes/alocacoes";
 import type { DetalheAlocacaoReal } from "@/server/modulos/alocacoes";
 import { DialogoDevolucao } from "./dialogo-devolucao";
+import { DialogoTransferirDaAlocacao, transferiveis } from "./dialogo-transferir-alocacao";
 
 type Resposta = Awaited<ReturnType<typeof acaoDetalheAlocacao>>;
-export type PermissoesAlocacao = { confirmar: boolean; cancelar: boolean; devolver: boolean; anexarTer: boolean };
+export type PermissoesAlocacao = {
+  confirmar: boolean;
+  cancelar: boolean;
+  devolver: boolean;
+  /** Abrir o TER na aba TER (envio, PDF assinado e conferência ficam lá). */
+  verTer: boolean;
+  /** Transferir equipamento para outro colaborador (só em alocação ativa). */
+  transferir?: boolean;
+  /** Fazer a avaliação técnica do equipamento devolvido. */
+  avaliar?: boolean;
+};
+
+type ItemAlocacao = DetalheAlocacaoReal["itens"][number];
+
+/** O que os diálogos de transferência precisam de um item da alocação. */
+function equipamentoDoItem(d: DetalheAlocacaoReal, i: ItemAlocacao): EquipamentoTransferencia {
+  return {
+    id: i.ativo.id,
+    rotulo: i.ativo.nome ?? i.ativo.patrimonio ?? i.ativo.modelo,
+    descricao: `${i.ativo.rotuloCategoria} · ${i.ativo.marca} ${i.ativo.modelo}`,
+    empresa: i.empresaProprietaria,
+    responsavel: d.estado === "ATIVA" ? { id: d.colaborador.id, nome: d.colaborador.nome, alocacao: d.numero, alocacaoId: d.id, empresa: d.empresaColaborador } : null,
+    empresaAutorizada: d.empresaColaborador,
+    carregadores: d.itens
+      .filter((c) => c.aberto && c.ativo.carregadorDe === i.ativo.id)
+      .map((c) => ({ id: c.ativo.id, nome: c.ativo.nome, patrimonio: c.ativo.patrimonio, situacao: c.ativo.situacao })),
+  };
+}
 
 /** Cabeçalho mostrado na hora (linha clicada); o restante vem do servidor. */
 export type AlocacaoCabecalho = { id: string; numero: string; colaborador: string; estado: DetalheAlocacaoReal["estado"] };
@@ -80,7 +112,9 @@ function Conteudo({ inicial, pode, destacarAtivo }: { inicial: AlocacaoCabecalho
   const router = useRouter();
   const [resposta, setResposta] = useState<Resposta | null>(null);
   const [tentativa, setTentativa] = useState(0);
-  const [acao, setAcao] = useState<"confirmar" | "cancelar" | "devolver" | null>(null);
+  const [acao, setAcao] = useState<"confirmar" | "cancelar" | "devolver" | "transferir" | null>(null);
+  const [avaliando, setAvaliando] = useState<EquipamentoAvaliacao | null>(null);
+  const [condicao, setCondicao] = useState<InspecaoExibida | null>(null);
   // Uma consulta por abertura, mesmo com o efeito executado duas vezes no StrictMode (dev).
   const pedido = useRef<{ chave: string; promessa: Promise<Resposta> } | null>(null);
 
@@ -101,6 +135,7 @@ function Conteudo({ inicial, pode, destacarAtivo }: { inicial: AlocacaoCabecalho
   const d = resposta?.ok ? resposta.dados : null;
   const estado = d?.estado ?? inicial.estado;
   const ter = d?.termos.find((t) => t.tipo === "TER" && t.estado !== "CANCELADO") ?? null;
+  const terPortal = d?.termos.find((t) => t.tipo === "TER" && t.situacao) ?? null;
   const abertos = d?.itens.filter((i) => i.aberto) ?? [];
 
   return (
@@ -116,7 +151,9 @@ function Conteudo({ inicial, pode, destacarAtivo }: { inicial: AlocacaoCabecalho
               <span className="font-semibold text-titulo">{d?.colaborador.nome ?? inicial.colaborador}</span>
               {d ? <span>{d.empresaColaborador.nome}</span> : null}
               <Estado grupo="alocacao" valor={estado} />
-              {d && estado !== "RESERVADA" && estado !== "CANCELADA" ? <BadgeTer estado={ter?.estado ?? null} /> : null}
+              {d && estado !== "RESERVADA" && estado !== "CANCELADA" ? (
+                terPortal?.situacao ? <Estado grupo="ter" valor={terPortal.situacao} /> : <BadgeTer estado={ter?.estado ?? null} />
+              ) : null}
             </div>
           </DialogDescription>
         </DialogHeader>
@@ -186,7 +223,7 @@ function Conteudo({ inicial, pode, destacarAtivo }: { inicial: AlocacaoCabecalho
                 {d.itens.map((i) => {
                   const outra = i.empresaProprietaria.id !== d.empresaColaborador.id;
                   return (
-                    <li key={i.id} className={cn("flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center", destacarAtivo === i.ativo.id && "bg-accent/50")}>
+                    <li key={i.id} className={cn("flex flex-col gap-2 px-4 py-3 sm:flex-row sm:flex-wrap sm:items-center", destacarAtivo === i.ativo.id && "bg-accent/50")}>
                       <div className="flex min-w-0 flex-1 items-center gap-3">
                         <MiniaturaEquipamento url={i.ativo.miniatura} categoria={i.ativo.categoria} />
                         <span className="min-w-0">
@@ -215,11 +252,53 @@ function Conteudo({ inicial, pode, destacarAtivo }: { inicial: AlocacaoCabecalho
                           </StatusBadge>
                         )}
                       </div>
+                      {i.aberto && i.transferenciaPendente ? (
+                        <div className="sm:basis-full">
+                          <AvisoTransferenciaReservada
+                            equipamento={equipamentoDoItem(d, i)}
+                            transferencia={i.transferenciaPendente}
+                            pode={{ confirmar: Boolean(pode.transferir) && pode.confirmar && pode.devolver, cancelar: pode.cancelar }}
+                            aoConcluir={recarregar}
+                          />
+                        </div>
+                      ) : null}
+                      {i.verificacao ? (
+                        <p className="flex flex-wrap items-center gap-1.5 text-[12.5px] text-muted-foreground sm:basis-full" data-testid="condicao-entrega">
+                          <span>Condição na entrega:</span>
+                          {i.verificacao.instantaneo.inspecao.resultado ? <ResultadoInspecaoBadge resultado={i.verificacao.instantaneo.inspecao.resultado} className="h-5 text-[11px]" /> : null}
+                          <span>
+                            {i.verificacao.instantaneo.inspecao.numero} · {i.verificacao.modo === "CONFIRMOU_ULTIMA" ? "última inspeção confirmada" : "inspeção na entrega"}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setCondicao(exibirInstantaneo(i.verificacao!))}
+                            className="font-semibold text-link underline-offset-4 hover:underline focus-visible:underline focus-visible:outline-none"
+                          >
+                            Ver checklist
+                          </button>
+                        </p>
+                      ) : null}
                       {i.devolucao ? (
                         <p className="text-[12.5px] text-muted-foreground sm:basis-full">
                           {i.devolucao.numero}: {ROTULO_ESTADO_FISICO[i.devolucao.estadoFisico]} → {ROTULO_DESTINO_DEVOLUCAO[i.devolucao.destino]}
                           {i.devolucao.observacoes ? ` · ${i.devolucao.observacoes}` : ""}
                         </p>
+                      ) : null}
+                      {!i.aberto && i.ativo.inspecaoPendente ? (
+                        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-atencao/30 bg-atencao-fundo px-3 py-2 text-[12.5px] text-atencao sm:basis-full" data-testid="inspecao-pendente">
+                          <ClipboardCheck className="size-4 shrink-0" aria-hidden />
+                          <span className="min-w-0 flex-1">Em avaliação: a inspeção técnica está pendente. O equipamento só volta a ser alocado depois dela.</span>
+                          {pode.avaliar ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => setAvaliando({ id: i.ativo.id, rotulo: i.ativo.nome ?? i.ativo.patrimonio ?? i.ativo.modelo })}
+                            >
+                              Realizar inspeção
+                            </Button>
+                          ) : null}
+                        </div>
                       ) : null}
                     </li>
                   );
@@ -228,7 +307,7 @@ function Conteudo({ inicial, pode, destacarAtivo }: { inicial: AlocacaoCabecalho
             </TabsContent>
 
             <TabsContent value="documentos" className="flex flex-col gap-4">
-              <Documentos dados={d} podeAnexar={pode.anexarTer} aoMudar={recarregar} />
+              <Documentos dados={d} podeVerTer={pode.verTer} />
             </TabsContent>
 
             <TabsContent value="historico">
@@ -278,6 +357,12 @@ function Conteudo({ inicial, pode, destacarAtivo }: { inicial: AlocacaoCabecalho
             <CheckCircle2 aria-hidden /> Confirmar entrega
           </Button>
         ) : null}
+        {/* A transferência para outro colaborador só existe em alocação ativa. */}
+        {d && estado === "ATIVA" && pode.transferir && transferiveis(d).length ? (
+          <Button variant="secondary" onClick={() => setAcao("transferir")} data-testid="transferir-colaborador">
+            <ArrowLeftRight aria-hidden /> Transferir colaborador
+          </Button>
+        ) : null}
         {d && estado === "ATIVA" && pode.devolver && abertos.length ? (
           <Button onClick={() => setAcao("devolver")}>
             <Undo2 aria-hidden /> Registrar devolução
@@ -288,52 +373,57 @@ function Conteudo({ inicial, pode, destacarAtivo }: { inicial: AlocacaoCabecalho
       {d && acao === "confirmar" ? <DialogoConfirmarEntrega dados={d} aoFechar={() => setAcao(null)} aoConcluir={recarregar} /> : null}
       {d && acao === "cancelar" ? <DialogoCancelarReserva dados={d} aoFechar={() => setAcao(null)} aoConcluir={recarregar} /> : null}
       {d && acao === "devolver" ? <DialogoDevolucao dados={d} aoFechar={() => setAcao(null)} aoConcluir={recarregar} /> : null}
+      {d && acao === "transferir" ? (
+        <DialogoTransferirDaAlocacao dados={d} podeEntregar={pode.confirmar && pode.devolver} aoFechar={() => setAcao(null)} aoConcluir={recarregar} />
+      ) : null}
+      {avaliando ? <DialogoAvaliacaoTecnica key={avaliando.id} aberto aoMudar={(v) => !v && setAvaliando(null)} equipamento={avaliando} aoConcluir={recarregar} /> : null}
+      <DialogoDetalhesInspecao dados={condicao} aberto={Boolean(condicao)} aoMudar={(v) => !v && setCondicao(null)} />
     </>
   );
 }
 
-function Documentos({ dados, podeAnexar, aoMudar }: { dados: DetalheAlocacaoReal; podeAnexar: boolean; aoMudar: () => void }) {
-  const [arquivo, setArquivo] = useState<File | null>(null);
-  const [erro, setErro] = useState<string | null>(null);
-  const [enviando, setEnviando] = useState(false);
+/**
+ * TER da alocação: o emitido pelo portal (um por entrega física) e registros anteriores. O status
+ * do TER não muda a entrega física; envio, PDF assinado e conferência ficam na aba TER.
+ */
+function Documentos({ dados, podeVerTer }: { dados: DetalheAlocacaoReal; podeVerTer: boolean }) {
   const entregue = dados.estado === "ATIVA" || dados.estado === "ENCERRADA";
-  const assinado = dados.termos.some((t) => t.tipo === "TER" && t.estado === "ASSINADO");
-
-  async function enviar() {
-    if (!arquivo) return setErro("Selecione o PDF do termo assinado.");
-    if (arquivo.size > 10 * 1024 * 1024) return setErro("O PDF pode ter no máximo 10 MB.");
-    setEnviando(true);
-    const dadosForm = new FormData();
-    dadosForm.set("alocacaoId", dados.id);
-    dadosForm.set("pdf", arquivo);
-    const r = await acaoRegistrarTerAssinado(dadosForm).catch(() => ({ ok: false as const, erro: FALHA }));
-    setEnviando(false);
-    if (!r.ok) return setErro(r.erro);
-    toast.success(r.mensagem);
-    setArquivo(null);
-    setErro(null);
-    aoMudar();
-  }
-
   return (
     <>
       {dados.termos.length === 0 ? (
         <p className="flex items-center gap-2 text-[13px] text-muted-foreground">
-          <FileText className="size-4" aria-hidden /> Nenhum TER registrado para esta alocação.
+          <FileText className="size-4" aria-hidden />
+          {entregue ? "Nenhum TER para esta alocação: entregas anteriores à emissão automática não têm termo gerado." : "O TER é gerado automaticamente na entrega física."}
         </p>
       ) : (
-        <ul className="divide-y rounded-xl border">
+        <ul className="divide-y rounded-xl border" data-testid="termos-alocacao">
           {dados.termos.map((t) => (
             <li key={t.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
               <span className="min-w-0 flex-1">
-                <span className="tabular block font-semibold text-titulo">{t.numero}</span>
+                <span className="tabular block font-semibold text-titulo">
+                  {t.numero}
+                  {t.situacao && t.versao && t.versao > 1 ? <span className="font-normal text-muted-foreground"> · versão {t.versao}</span> : null}
+                </span>
                 <span className="block text-[12.5px] text-muted-foreground">
-                  {t.emitidoEm ? `Emitido em ${formatarData(t.emitidoEm)}` : "Recebido assinado"}
-                  {t.assinadoEm ? ` · PDF assinado registrado em ${formatarDataHora(t.assinadoEm)} por ${t.assinadoPorNome}` : ""}
+                  {t.emitidoEm ? `Emitido em ${formatarDataHora(t.emitidoEm)}` : t.situacao ? "PDF ainda não emitido" : "Recebido assinado"}
+                  {t.assinadoEm ? ` · assinatura conferida em ${formatarDataHora(t.assinadoEm)} por ${t.assinadoPorNome}` : ""}
                 </span>
               </span>
-              <Estado grupo="termo" valor={t.estado} />
-              {t.temPdf ? (
+              {t.situacao ? <Estado grupo="ter" valor={t.situacao} /> : <Estado grupo="termo" valor={t.estado} />}
+              {t.situacao && podeVerTer ? (
+                <Button asChild variant="secondary" size="sm">
+                  <Link href={`/ti/documentos/ter?ter=${t.id}`}>
+                    <FileText aria-hidden /> Abrir na aba TER
+                  </Link>
+                </Button>
+              ) : null}
+              {t.temPdfEmitido ? (
+                <Button asChild variant="ghost" size="sm">
+                  <a href={`/api/termos/${t.id}/pdf?arquivo=emitido`} target="_blank" rel="noopener">
+                    <FileCheck2 aria-hidden /> PDF emitido
+                  </a>
+                </Button>
+              ) : !t.situacao && t.temPdf ? (
                 <Button asChild variant="secondary" size="sm">
                   <a href={`/api/termos/${t.id}/pdf`} target="_blank" rel="noopener">
                     <FileCheck2 aria-hidden /> Abrir PDF
@@ -344,68 +434,81 @@ function Documentos({ dados, podeAnexar, aoMudar }: { dados: DetalheAlocacaoReal
           ))}
         </ul>
       )}
-      {podeAnexar && entregue && !assinado ? (
-        <section aria-label="Registrar TER assinado" className="rounded-xl border p-4">
-          <h3 className="text-[13px] font-bold text-titulo">Registrar TER assinado</h3>
-          <p className="mt-0.5 text-[12.5px] text-muted-foreground">PDF assinado fora do portal (GOV.BR). O documento só fica como assinado com o PDF guardado.</p>
-          {erro ? (
-            <div className="mt-2">
-              <AlertaFormulario tom="erro">{erro}</AlertaFormulario>
-            </div>
-          ) : null}
-          <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
-            <Input
-              type="file"
-              accept="application/pdf"
-              aria-label="PDF do termo assinado"
-              onChange={(e) => {
-                setArquivo(e.target.files?.[0] ?? null);
-                setErro(null);
-              }}
-              className="sm:max-w-sm"
-            />
-            <Button variant="secondary" carregando={enviando} rotuloCarregando="Enviando…" onClick={() => void enviar()}>
-              <FileUp aria-hidden /> Registrar PDF
-            </Button>
-          </div>
-        </section>
+      {entregue ? (
+        <p className="flex items-start gap-2 rounded-lg bg-muted px-3 py-2 text-[12.5px] text-muted-foreground">
+          <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />O status do TER não altera a entrega física. Envio para assinatura, PDF assinado e conferência ficam na aba TER.
+        </p>
       ) : null}
-      {!entregue ? <p className="text-[12.5px] text-muted-foreground">O TER assinado é registrado depois da entrega física.</p> : null}
     </>
   );
 }
 
+/** Reserva → entrega física: data da entrega e a verificação técnica de cada equipamento. */
 function DialogoConfirmarEntrega({ dados, aoFechar, aoConcluir }: { dados: DetalheAlocacaoReal; aoFechar: () => void; aoConcluir: () => void }) {
   const [quando, setQuando] = useState(() => agoraLocal());
   const [erro, setErro] = useState<string | null>(null);
   const [enviando, setEnviando] = useState(false);
+  const [decisoes, setDecisoes] = useState<Decisoes>({});
+  const [erros, setErros] = useState<Record<string, string>>({});
+  const reservados = dados.itens.filter((i) => i.aberto).map((i) => i.ativo.id);
+  const { condicoes, erro: erroCondicoes, recarregar } = useCondicoesEntrega(reservados, true);
   async function confirmar() {
+    if (!condicoes) return;
+    const e = errosVerificacao(condicoes, decisoes);
+    setErros(e);
+    if (Object.keys(e).length) return setErro("Confirme a condição de cada equipamento antes da entrega.");
+    const { verificacoes, anexos } = montarVerificacoes(condicoes, decisoes);
     setEnviando(true);
-    const r = await acaoConfirmarEntrega(dados.id, localParaIso(quando)).catch(() => ({ ok: false as const, erro: FALHA }));
+    setErro(null);
+    const r = await acaoConfirmarEntrega(dados.id, localParaIso(quando), verificacoes, anexos).catch(() => ({ ok: false as const, erro: FALHA }));
     setEnviando(false);
-    if (!r.ok) return setErro(r.erro);
+    if (!r.ok) {
+      if (/inspeç|condição/i.test(r.erro)) recarregar();
+      return setErro(r.erro);
+    }
     toast.success(r.mensagem);
     aoFechar();
     aoConcluir();
   }
   return (
     <Dialog open onOpenChange={(v) => !v && !enviando && aoFechar()}>
-      <DialogContent className={cn(MODAL_CENTRALIZADO, "w-[calc(100%-1rem)] sm:max-w-[520px]")} data-testid="dialogo-confirmar-entrega">
-        <DialogHeader>
+      <DialogContent
+        className={cn(
+          MODAL_CENTRALIZADO,
+          "flex max-h-[calc(100dvh-2rem)] w-[calc(100%-1rem)] flex-col gap-0 overflow-hidden p-0",
+          "sm:max-w-[min(760px,calc(100%-2rem))] lg:max-w-[min(760px,calc(100%_-_var(--largura-sidebar,15rem)_-_2rem))]",
+        )}
+        data-testid="dialogo-confirmar-entrega"
+        onInteractOutside={(e) => e.preventDefault()}
+      >
+        <DialogHeader className="shrink-0 border-b px-6 pt-5 pr-14 pb-4">
           <DialogTitle>Confirmar entrega física</DialogTitle>
           <DialogDescription>
-            {dados.itens.filter((i) => i.aberto).length} equipamento(s) passam a ficar com {dados.colaborador.nome}. O TER segue o próprio ciclo.
+            {reservados.length} equipamento(s) passam a ficar com {dados.colaborador.nome}. O TER segue o próprio ciclo.
           </DialogDescription>
         </DialogHeader>
-        {erro ? <AlertaFormulario tom="erro">{erro}</AlertaFormulario> : null}
-        <Campo rotulo="Data e hora da entrega" obrigatorio>
-          {(p) => <Input {...p} type="datetime-local" value={quando} max={agoraLocal()} onChange={(e) => setQuando(e.target.value)} />}
-        </Campo>
-        <DialogFooter>
+        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overscroll-contain px-6 py-5">
+          {erro ? <AlertaFormulario tom="erro">{erro}</AlertaFormulario> : null}
+          <Campo rotulo="Data e hora da entrega" obrigatorio className="sm:max-w-xs">
+            {(p) => <Input {...p} type="datetime-local" value={quando} max={agoraLocal()} onChange={(e) => setQuando(e.target.value)} />}
+          </Campo>
+          <VerificacaoCondicoes
+            condicoes={condicoes}
+            erro={erroCondicoes}
+            aoTentarDeNovo={recarregar}
+            decisoes={decisoes}
+            aoMudar={(id, d) => {
+              setDecisoes((x) => ({ ...x, [id]: d }));
+              setErros((x) => ({ ...x, [id]: "" }));
+            }}
+            erros={erros}
+          />
+        </div>
+        <DialogFooter className="mx-0 mb-0 shrink-0">
           <Button variant="secondary" disabled={enviando} onClick={aoFechar}>
             Voltar
           </Button>
-          <Button carregando={enviando} rotuloCarregando="Confirmando…" onClick={() => void confirmar()}>
+          <Button carregando={enviando} rotuloCarregando="Confirmando…" disabled={!condicoes} onClick={() => void confirmar()}>
             Confirmar entrega
           </Button>
         </DialogFooter>

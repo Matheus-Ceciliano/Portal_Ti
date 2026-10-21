@@ -17,6 +17,8 @@ const nextConfig: NextConfig = {
   // A suíte E2E usa um diretório próprio para rodar ao lado do servidor de desenvolvimento.
   distDir: process.env.NEXT_DIST_DIR ?? ".next",
   poweredByHeader: false,
+  // PDF do TER gerado no servidor (react-pdf usa recursos do Node que não passam pelo empacotador).
+  serverExternalPackages: ["@react-pdf/renderer", "sharp"],
   // O selo de desenvolvimento fica à direita para não cobrir "Mais opções" no rodapé da barra lateral.
   devIndicators: { position: "bottom-right" },
   // Fotos de equipamentos e PDF do termo assinado (as fotos chegam reduzidas pelo navegador;

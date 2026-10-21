@@ -30,7 +30,7 @@ export const FORMATO_FREQUENCIA = /^[0-9]{3,5}$/;
 /** Itens que se ativam e inativam pela lista (as categorias têm formulário próprio). */
 export type ItemCatalogo = "marca" | "modelo" | "processador" | "sistema" | "memoria";
 
-export const ABAS_CATALOGO = ["categorias", "marcas", "modelos", "processadores", "sistemas", "memorias"] as const;
+export const ABAS_CATALOGO = ["categorias", "marcas", "modelos", "processadores", "sistemas", "memorias", "checklists"] as const;
 export type AbaCatalogo = (typeof ABAS_CATALOGO)[number];
 export const ROTULO_ABA_CATALOGO: Record<AbaCatalogo, string> = {
   categorias: "Categorias",
@@ -39,6 +39,7 @@ export const ROTULO_ABA_CATALOGO: Record<AbaCatalogo, string> = {
   processadores: "Processadores",
   sistemas: "Sistemas operacionais",
   memorias: "Memórias",
+  checklists: "Checklists de Inspeção",
 };
 
 /* Opções dos selects do cadastro de equipamentos (itens inativos vêm marcados). */

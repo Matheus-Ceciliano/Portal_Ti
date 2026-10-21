@@ -40,6 +40,16 @@ export async function restaurarCatalogo(db: Banco) {
   for (const tabela of ["sistema_operacional_categoria", "modelo_equipamento", "marca_equipamento", "processador", "sistema_operacional", "padrao_memoria"]) {
     await db.$executeRawUnsafe(`DELETE FROM "${tabela}"`);
   }
+  // Checklists de categorias criadas nos testes (as respostas já saíram com os equipamentos).
+  await db.$executeRawUnsafe(
+    `DELETE FROM "versao_pergunta_inspecao" WHERE "pergunta_id" IN (SELECT p."id" FROM "pergunta_inspecao" p JOIN "categoria_equipamento" c ON c."id" = p."categoria_id" WHERE NOT c."sistema" OR p."codigo" IS NULL)`,
+  );
+  await db.$executeRawUnsafe(
+    `DELETE FROM "pergunta_inspecao" WHERE "categoria_id" IN (SELECT "id" FROM "categoria_equipamento" WHERE NOT "sistema") OR "codigo" IS NULL`,
+  );
+  // Checklist inicial: versões e situação criadas por testes voltam ao estado da migração.
+  await db.$executeRawUnsafe(`DELETE FROM "versao_pergunta_inspecao" WHERE "versao" > 1 AND "pergunta_id" IN (SELECT "id" FROM "pergunta_inspecao" WHERE "codigo" IS NOT NULL)`);
+  await db.$executeRawUnsafe(`UPDATE "pergunta_inspecao" SET "ativa" = true WHERE "codigo" IS NOT NULL AND NOT "ativa"`);
   await db.$executeRawUnsafe(`DELETE FROM "categoria_equipamento" WHERE NOT "sistema"`);
   // Libera nomes e abreviações antes de reaplicar (evita colisão ao trocar entre categorias).
   await db.$executeRawUnsafe(`UPDATE "categoria_equipamento" SET "nome" = 'tmp-' || "id", "prefixo" = NULL, "regra" = 'NENHUMA'`);

@@ -6,6 +6,7 @@ import {
   FOTOS_POR_ENVIO,
   numeroAlocacao,
   numeroDocumento,
+  numeroTer,
   ROTULO_SITUACAO,
   TIPOS_FOTO,
   transicaoValida,
@@ -64,6 +65,22 @@ export async function proximoNumeroAlocacao(tx: ClienteBanco) {
   return numeroAlocacao(Number(valor));
 }
 
+/**
+ * Número do TER (TER0001, TER0002...): sequência única, sem reinício anual, no mesmo padrão
+ * das alocações. Parte do maior número já usado — inclusive no formato antigo (TER-AAAA-NNNN)
+ * —, então nenhum número se repete; os termos já emitidos mantêm o número que têm.
+ */
+export async function proximoNumeroTer(tx: ClienteBanco) {
+  const [{ n }] = await tx.$queryRaw<{ n: number }[]>`
+    SELECT COALESCE(MAX(COALESCE(substring("numero" from '^TER([0-9]+)$'), substring("numero" from '^TER-[0-9]{4}-([0-9]+)$'))::bigint), 0)::int AS n
+    FROM "termo" WHERE "tipo" = 'TER'`;
+  const [{ valor }] = await tx.$queryRaw<{ valor: number }[]>`
+    INSERT INTO "contador_documento" (chave, valor) VALUES ('TER', ${n + 1})
+    ON CONFLICT (chave) DO UPDATE SET valor = GREATEST("contador_documento".valor + 1, ${n + 1})
+    RETURNING valor`;
+  return numeroTer(Number(valor));
+}
+
 /** Mesma marca escrita de outro jeito ("dell", "DELL") usa a grafia já cadastrada. */
 export async function marcaCanonica(db: ClienteBanco, marca: string) {
   const existente = await db.ativo.findFirst({ where: { marca: { equals: marca, mode: "insensitive" } }, select: { marca: true } });
@@ -118,8 +135,60 @@ export async function mudarSituacao(
   if (!transicaoValida(ativo.situacao, para)) {
     throw new ErroNegocio(`${ativo.rotulo}: não é possível passar de "${ROTULO_SITUACAO[ativo.situacao]}" para "${ROTULO_SITUACAO[para]}".`);
   }
+  if (ativo.situacao === "DEVOLVIDO_EM_AVALIACAO" && para !== ativo.situacao) await sairDaAvaliacao(tx, ativo, para, m.quando ?? new Date());
   await tx.ativo.update({ where: { id: ativo.id }, data: { situacao: para, situacaoDesde: m.quando ?? new Date() } });
   await registrarMovimentacao(tx, ator, ativo.id, { ...m, situacaoAnterior: ativo.situacao, situacaoNova: para });
+  // Em avaliação, o equipamento aguarda a inspeção técnica (a devolução física não espera por ela).
+  if (para === "DEVOLVIDO_EM_AVALIACAO" && ativo.situacao !== para) await abrirInspecaoPendente(tx, ator, ativo.id, m);
+}
+
+/** Inspeção pendente do equipamento que entrou em avaliação (uma só: o índice único garante). */
+async function abrirInspecaoPendente(tx: ClienteBanco, ator: Ator, ativoId: string, m: Movimentacao) {
+  const ja = await tx.inspecaoTecnica.findFirst({ where: { ativoId, pendente: true }, select: { id: true } });
+  if (ja) return;
+  await tx.inspecaoTecnica.create({
+    data: {
+      ativoId,
+      tipo: "DEVOLUCAO",
+      estado: "PENDENTE",
+      pendente: true,
+      devolucaoId: m.devolucaoId,
+      abertaEm: m.quando ?? new Date(),
+      abertaPorNome: ator.nome,
+      motivoAbertura: m.observacao?.slice(0, 500) || null,
+    },
+  });
+}
+
+/**
+ * Saída da avaliação: para disponível, só com a inspeção concluída depois da entrada em
+ * avaliação e sem defeito bloqueante (nunca libera sem inspeção); manutenção ou baixa
+ * cancelam a inspeção pendente, que fica no histórico com o motivo.
+ */
+async function sairDaAvaliacao(tx: ClienteBanco, ativo: { id: string; rotulo: string }, para: Situacao, quando: Date) {
+  if (para === "DISPONIVEL") {
+    if (await tx.inspecaoTecnica.count({ where: { ativoId: ativo.id, pendente: true } })) {
+      throw new ErroNegocio(`${ativo.rotulo}: conclua a inspeção técnica pendente antes de liberar o equipamento.`);
+    }
+    const { situacaoDesde } = await tx.ativo.findUniqueOrThrow({ where: { id: ativo.id }, select: { situacaoDesde: true } });
+    const ultima = await tx.inspecaoTecnica.findFirst({
+      where: { ativoId: ativo.id, estado: "CONCLUIDA", concluidaEm: { gte: situacaoDesde } },
+      orderBy: { concluidaEm: "desc" },
+      select: { numero: true, resultado: true },
+    });
+    if (!ultima) throw new ErroNegocio(`${ativo.rotulo}: registre a inspeção técnica antes de liberar o equipamento.`);
+    if (ultima.resultado === "INAPTO") throw new ErroNegocio(`${ativo.rotulo}: a inspeção ${ultima.numero} encontrou defeito bloqueante. Encaminhe o equipamento para manutenção.`);
+    return;
+  }
+  await tx.inspecaoTecnica.updateMany({
+    where: { ativoId: ativo.id, pendente: true },
+    data: {
+      estado: "CANCELADA",
+      pendente: null,
+      canceladaEm: quando,
+      motivoCancelamento: para === "MANUTENCAO" ? "Equipamento encaminhado para manutenção antes da inspeção." : "Equipamento baixado antes da inspeção.",
+    },
+  });
 }
 
 /** Encerra um item de alocação em aberto (o índice único libera o equipamento). */

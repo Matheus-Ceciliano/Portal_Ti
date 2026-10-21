@@ -33,6 +33,9 @@ export function cnpjValido(valor: string): boolean {
   return cnpj.slice(12) === calcularDigitosCnpj(cnpj.slice(0, 12));
 }
 
+/** CNPJ de dados fictícios do portal ("TESTE" na base): nunca vai para documento oficial. */
+export const cnpjFicticio = (valor: string) => normalizarCnpj(valor).includes("TESTE");
+
 /** Mensagem de erro amigável, ou null se o CNPJ é estruturalmente válido. */
 export function problemaCnpj(valor: string): string | null {
   const cnpj = normalizarCnpj(valor);

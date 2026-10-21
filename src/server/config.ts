@@ -13,6 +13,12 @@ const esquema = z
     SENHA_PEPPER: z.string().min(32),
     MODO_INTEGRACOES: z.enum(["SIMULACAO", "ATIVO"]).default("SIMULACAO"),
     TENANTS_ESCRITA_AUTORIZADOS: z.string().default(""),
+    /**
+     * CPF (DA-11): chave AES-256-GCM e chave do HMAC, separadas (32 bytes em base64url).
+     * Sem elas o portal não grava nem revela CPF. Perder a chave de cifra torna o dado irrecuperável.
+     */
+    CPF_CHAVE_CIFRA: z.string().min(43).optional(),
+    CPF_CHAVE_HMAC: z.string().min(43).optional(),
   })
   .superRefine((c, ctx) => {
     if (c.MODO_INTEGRACOES !== "SIMULACAO") {
@@ -29,6 +35,9 @@ const esquema = z
         path: ["TENANTS_ESCRITA_AUTORIZADOS"],
         message: "deve ficar vazia até registro de autorização da TI (Q-09)",
       });
+    }
+    if (c.CPF_CHAVE_CIFRA && c.CPF_CHAVE_CIFRA === c.CPF_CHAVE_HMAC) {
+      ctx.addIssue({ code: "custom", path: ["CPF_CHAVE_HMAC"], message: "precisa ser diferente da chave de cifra do CPF" });
     }
     if (c.AMBIENTE !== "DESENVOLVIMENTO" && !c.BETTER_AUTH_URL.startsWith("https://")) {
       ctx.addIssue({

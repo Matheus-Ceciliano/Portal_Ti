@@ -101,10 +101,9 @@ export const transicaoValida = (de: Situacao, para: Situacao) => TRANSICOES[de].
 export const PODE_IR_PARA_MANUTENCAO: readonly Situacao[] = ["DISPONIVEL", "ALOCADO", "DEVOLVIDO_EM_AVALIACAO"];
 
 /**
- * Transferência de colaborador: do estoque (nova alocação) ou de quem está com o equipamento.
+ * Transferência de colaborador: só a partir de uma alocação ativa (equipamento com alguém).
  * As demais situações explicam o bloqueio; a de empresa só não vale para baixado.
  */
-export const PODE_TRANSFERIR_COLABORADOR: readonly Situacao[] = ["DISPONIVEL", "ALOCADO"];
 export const BLOQUEIO_TRANSFERENCIA_COLABORADOR: Partial<Record<Situacao, string>> = {
   RESERVADO: "Equipamento reservado: confirme a entrega ou cancele a reserva em Alocações.",
   MANUTENCAO: "Equipamento em manutenção não pode ser transferido. Conclua a manutenção antes.",
@@ -167,6 +166,8 @@ export const ROTULO_MOVIMENTACAO: Record<string, string> = {
   COMPONENTE_INSTALADO: "Componente instalado",
   COMPONENTE_REMOVIDO: "Componente removido",
   COMPONENTE_SUBSTITUIDO: "Componente substituído",
+  ALUGUEL_INICIADO: "Aluguel entre empresas",
+  ALUGUEL_ENCERRADO: "Fim do aluguel entre empresas",
   RESERVA: "Reserva para entrega",
   CANCELAMENTO_RESERVA: "Reserva cancelada",
   ENTREGA: "Entrega física",
@@ -205,6 +206,9 @@ export function situacaoAposDesvinculo(motivo: (typeof MOTIVOS_CARREGADOR)[numbe
 
 /** Número da alocação: AL + sequência de pelo menos 4 dígitos (AL0001, AL0032...). */
 export const numeroAlocacao = (sequencia: number) => `AL${String(sequencia).padStart(4, "0")}`;
+
+/** Número do TER: TER0001, TER0002... (mesmo padrão das alocações). */
+export const numeroTer = (sequencia: number) => `TER${String(sequencia).padStart(4, "0")}`;
 
 /** Número legível de documento: PREFIXO-AAAA-NNNN. */
 export function numeroDocumento(prefixo: string, ano: number, sequencia: number): string {

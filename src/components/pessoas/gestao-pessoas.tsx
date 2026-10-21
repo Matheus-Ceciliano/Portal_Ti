@@ -2,7 +2,7 @@
 
 import { Eye, Layers, Pencil, Plus, UserRoundX } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { FiltrosUrl } from "@/components/comum/filtros-url";
 import { CabecalhoPagina, EstadoVazio } from "@/components/comum/pagina";
@@ -53,6 +53,7 @@ function paraEditavel(d: DetalhePessoa): PessoaEditavel {
     loginMicrosoft: p.loginMicrosoft,
     email: p.email,
     fotoUrl: p.fotoUrl,
+    cpf: p.cpf,
   };
 }
 
@@ -105,13 +106,27 @@ export function GestaoPessoas({
     }
     abrirEdicao(r.dados);
   }
+  // ?editar=<id> (ex.: pendência de cadastro no TER) abre a edição da pessoa uma vez.
+  const editarUrl = busca.get("editar");
+  useEffect(() => {
+    if (!editarUrl || !editaveis.includes(editarUrl)) return;
+    let ativo = true;
+    acaoDetalhePessoa(editarUrl)
+      .then((r) => ativo && (r.ok ? abrirEdicao(r.dados) : toast.error(r.erro)))
+      .catch(() => ativo && toast.error("Não foi possível carregar a pessoa. Tente novamente."));
+    return () => {
+      ativo = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- só o parâmetro da URL dispara
+  }, [editarUrl]);
   const mudarFormulario = (aberto: boolean) => {
     // Fechar recria o formulário: nada do cadastro (inclusive a senha, derivada dos campos) fica no estado.
     setFormulario((f) => ({ ...f, aberto, chave: aberto ? f.chave : f.chave + 1 }));
-    // ?cadastrar=1 (endereço antigo /nova) só abre uma vez.
-    if (!aberto && busca.get("cadastrar")) {
+    // ?cadastrar=1 (endereço antigo /nova) e ?editar=<id> só abrem uma vez.
+    if (!aberto && (busca.get("cadastrar") || busca.get("editar"))) {
       const p = new URLSearchParams(busca.toString());
       p.delete("cadastrar");
+      p.delete("editar");
       router.replace(p.size ? `${caminho}?${p}` : caminho, { scroll: false });
     }
   };

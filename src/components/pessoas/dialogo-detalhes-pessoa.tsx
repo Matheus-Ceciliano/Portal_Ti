@@ -222,6 +222,7 @@ function Conteudo({ inicial, aoEditar }: { inicial: PessoaCabecalho; aoEditar?: 
                         ["Empresa", p.empresa.nome],
                         ["Cargo", p.cargo],
                         ["Departamento", p.departamento],
+                        ["CPF", p.cpf ? <span key="cpf" className="tabular">{p.cpf}</span> : null],
                         ["Situação", <Estado key="s" grupo="colaborador" valor={p.situacao} />],
                         ["Cadastrada em", formatarData(p.criadoEm)],
                       ]}
@@ -311,8 +312,12 @@ function Conteudo({ inicial, aoEditar }: { inicial: PessoaCabecalho; aoEditar?: 
                             </span>
                           </span>
                           <span className="flex flex-wrap items-center gap-2">
-                            <BadgeTermo tipo={doc.tipo} estado={doc.estado} />
-                            {doc.temPdf ? (
+                            {doc.situacao ? <Estado grupo="ter" valor={doc.situacao} /> : <BadgeTermo tipo={doc.tipo} estado={doc.estado} />}
+                            {doc.situacao ? (
+                              <Link href={`/ti/documentos/ter?ter=${doc.id}`} className="text-[13px] font-semibold text-link underline-offset-4 hover:underline">
+                                Abrir TER
+                              </Link>
+                            ) : doc.temPdf ? (
                               <a href={`/api/termos/${doc.id}/pdf`} target="_blank" rel="noopener" className="text-[13px] font-semibold text-link underline-offset-4 hover:underline">
                                 Abrir PDF
                               </a>

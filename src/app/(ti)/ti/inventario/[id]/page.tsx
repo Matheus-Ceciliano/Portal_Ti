@@ -1,4 +1,4 @@
-import { ArrowLeft, CalendarClock, Cpu, History, Images, Keyboard, Laptop, Link2, MemoryStick, PackageCheck, PlugZap, Wrench } from "lucide-react";
+import { ArrowLeft, Building2, CalendarClock, ClipboardCheck, Cpu, FileSignature, History, Images, Keyboard, Laptop, Link2, MemoryStick, PackageCheck, PlugZap, Wrench } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { formatarData } from "@/components/comum/pagina";
@@ -7,12 +7,12 @@ import { texto } from "@/components/comum/tabela";
 import { AcoesFicha } from "@/components/inventario/ficha/acoes-ficha";
 import { CarregadoresFicha } from "@/components/inventario/ficha/carregadores-ficha";
 import { ComponentesInternos } from "@/components/inventario/ficha/componentes-internos";
-import { AvisoTransferenciaReservada } from "@/components/inventario/ficha/dialogos-transferencia";
-import { paraTransferencia } from "@/components/inventario/ficha/transferencia";
 import { GaleriaFotos } from "@/components/inventario/ficha/galeria-fotos";
+import { InspecoesFicha } from "@/components/inventario/ficha/inspecoes-ficha";
 import { formatarDataHora, identificacao, MiniaturaEquipamento } from "@/components/inventario/visual";
 import { formatarCapacidade } from "@/lib/componentes";
 import { ROTULO_PARTE } from "@/lib/identificacao";
+import { ROTULO_CONDICAO } from "@/lib/inspecao";
 import { COM_CONFIGURACAO, ROTULO_DESTINO_REMOCAO, ROTULO_MOVIMENTACAO, ROTULO_SITUACAO, type DestinoRemocao, type Situacao } from "@/lib/inventario";
 import { lerPessoaOrigem, lerRetorno } from "@/lib/retorno-empresa";
 import { cn } from "@/lib/utils";
@@ -23,6 +23,7 @@ import { listarEmpresas } from "@/server/modulos/empresas";
 import { catalogoInventario } from "@/server/modulos/categorias";
 import { obterEquipamento } from "@/server/modulos/inventario";
 import { obterPessoa } from "@/server/modulos/pessoas";
+import { tersRelacionados } from "@/server/modulos/ter";
 
 export const metadata = { title: "Equipamento" };
 
@@ -66,6 +67,90 @@ function Dado({ rotulo, valor, className }: { rotulo: string; valor?: React.Reac
 
 const RESULTADO = { REPARADO: "Reparado", SEM_REPARO: "Sem reparo" } as const;
 
+type Ficha = Awaited<ReturnType<typeof obterEquipamento>>;
+
+/**
+ * Proprietária, empresa que usa o equipamento (aluguel vigente) e os históricos de propriedade
+ * e de aluguéis — discretos, recolhidos por padrão.
+ */
+function EmpresaEAluguel({ ficha }: { ficha: Ficha }) {
+  const a = ficha.aluguel;
+  const historico = ficha.transferenciasEmpresa.length + ficha.alugueis.length;
+  return (
+    <div className="flex flex-col gap-3">
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-3">
+        <Dado rotulo="Proprietária" valor={ficha.empresa.nome} />
+        <Dado rotulo="Pode ser usado por" valor={a ? a.empresa.nome : ficha.empresa.nome} />
+      </dl>
+      {a ? (
+        <div className="rounded-xl border border-info/25 bg-info-fundo px-3.5 py-2.5 text-[13px]" data-testid="aluguel-vigente">
+          <p className="font-semibold text-titulo">
+            Alugado para {a.empresa.nome} ({a.empresa.sigla})
+          </p>
+          <p className="text-muted-foreground">
+            Desde {formatarData(a.inicio)}
+            {a.devolucaoPrevista ? ` · devolução prevista ${formatarData(a.devolucaoPrevista)}` : ""}
+            {a.herdado ? " · acompanha o aluguel do notebook" : ""}
+          </p>
+        </div>
+      ) : null}
+      {historico ? (
+        <details className="group" data-testid="historico-empresa-aluguel">
+          <summary className="cursor-pointer list-none text-[13px] font-semibold text-link underline-offset-4 hover:underline [&::-webkit-details-marker]:hidden">
+            Histórico de propriedade e aluguéis ({historico})
+          </summary>
+          <div className="mt-3 flex flex-col gap-3">
+            {ficha.transferenciasEmpresa.length ? (
+              <div>
+                <p className="mb-1 text-[12.5px] font-semibold text-muted-foreground">Propriedade</p>
+                <ol className="flex flex-col gap-2 border-l pl-3">
+                  {ficha.transferenciasEmpresa.map((t) => (
+                    <li key={t.id} className="text-[13px]">
+                      <p className="text-titulo">
+                        {t.de} → {t.para}
+                      </p>
+                      <p className="text-[12.5px] text-muted-foreground">
+                        {formatarDataHora(t.efetivadaEm)} · {t.realizadaPorNome}
+                        {t.motivo ? ` · ${t.motivo}` : ""}
+                      </p>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            ) : null}
+            {ficha.alugueis.length ? (
+              <div>
+                <p className="mb-1 text-[12.5px] font-semibold text-muted-foreground">Aluguéis</p>
+                <ol className="flex flex-col gap-2 border-l pl-3">
+                  {ficha.alugueis.map((x) => (
+                    <li key={x.id} className="text-[13px]">
+                      <p className="flex flex-wrap items-center gap-x-2 text-titulo">
+                        {x.empresa.nome}
+                        <span className={cn("rounded-sm px-1.5 text-[11px] leading-5 font-medium", x.vigente ? "bg-info-fundo text-info" : "bg-neutro-fundo text-neutro")}>
+                          {x.vigente ? "Vigente" : "Encerrado"}
+                        </span>
+                      </p>
+                      <p className="text-[12.5px] text-muted-foreground">
+                        {formatarData(x.inicio)} a {x.encerradoEm ? formatarDataHora(x.encerradoEm) : "hoje"}
+                        {x.devolucaoPrevista ? ` · prevista ${formatarData(x.devolucaoPrevista)}` : ""} · {x.registradoPorNome} · {x.motivo}
+                      </p>
+                      {x.encerradoEm ? (
+                        <p className="text-[12.5px] text-muted-foreground">
+                          Encerrado por {x.encerradoPorNome}: {x.motivoEncerramento}
+                        </p>
+                      ) : null}
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            ) : null}
+          </div>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
 /** Ficha individual do equipamento. Fora do menu lateral: aberta pelo Inventário, por Empresas ou por Pessoas. */
 export default async function PaginaEquipamento({
   params,
@@ -105,8 +190,6 @@ export default async function PaginaEquipamento({
 
   const podeEditar = pode(ator, "ativo.editar");
   const podeTransicionar = pode(ator, "ativo.transicionar");
-  // Encerrar a custódia de quem está com o equipamento equivale a registrar a devolução dele.
-  const podeEntregar = pode(ator, "alocacao.confirmar_entrega") && (!ficha.responsavel || pode(ator, "devolucao.registrar"));
   const [empresas, catalogo] = podeEditar
     ? await Promise.all([listarEmpresas(ator), catalogoInventario(ator)])
     : [[], { categorias: [], marcas: [], modelos: [], processadores: [], sistemas: [], memoria: [], podeGerir: false }];
@@ -115,6 +198,9 @@ export default async function PaginaEquipamento({
   const componente = ficha.componente;
   const instalacaoAtual = componente?.instalacoes.find((i) => i.vigente) ?? null;
   const aberta = ficha.manutencoes.find((m) => m.aberta);
+  // TERs das entregas físicas em que este equipamento foi entregue (cada um com o instantâneo da entrega).
+  const veTer = !componente && pode(ator, "termo.ver");
+  const ters = veTer ? await tersRelacionados(ator, { ativoId: ficha.id }) : [];
 
   return (
     <>
@@ -156,7 +242,7 @@ export default async function PaginaEquipamento({
             ficha={ficha}
             empresas={empresas.map((e) => ({ id: e.id, nome: e.nome, sigla: e.sigla, ativa: e.ativa }))}
             catalogo={catalogo}
-            pode={{ editar: podeEditar, transicionar: podeTransicionar, alocar: pode(ator, "alocacao.criar"), entregar: podeEntregar }}
+            pode={{ editar: podeEditar, transicionar: podeTransicionar }}
           />
           <Link
             href={origem?.href ?? "/ti/inventario"}
@@ -199,6 +285,7 @@ export default async function PaginaEquipamento({
                   <Dado rotulo="Garantia até" valor={ficha.garantiaAte ? formatarData(ficha.garantiaAte) : undefined} />
                 </>
               )}
+              <Dado rotulo="Condição de entrada" valor={ficha.condicaoEntrada ? ROTULO_CONDICAO[ficha.condicaoEntrada] : undefined} />
               <Dado rotulo="Situação" valor={<span className="inline-flex items-center gap-2"><Estado grupo="ativo" valor={ficha.situacao} /></span>} />
               <Dado rotulo="Na situação desde" valor={formatarDataHora(ficha.situacaoDesde)} />
               <Dado rotulo="Cadastrado" valor={`${formatarData(ficha.criadoEm)}${ficha.criadoPorNome ? ` · ${ficha.criadoPorNome}` : ""}`} />
@@ -249,6 +336,10 @@ export default async function PaginaEquipamento({
               />
             </Secao>
           ) : null}
+
+          <Secao titulo="Inspeções técnicas" icone={ClipboardCheck}>
+            <InspecoesFicha ficha={ficha} podeInspecionar={podeTransicionar} />
+          </Secao>
 
           <Secao titulo="Histórico de movimentações" icone={History}>
             {ficha.movimentacoes.length === 0 ? (
@@ -339,14 +430,50 @@ export default async function PaginaEquipamento({
             ) : (
               <p className="text-[13px] text-muted-foreground">Sem alocação vigente.</p>
             )}
+            {/* Transferências entre colaboradores são tratadas em Alocações; aqui, só o aviso. */}
             {ficha.transferenciaPendente ? (
-              <AvisoTransferenciaReservada
-                equipamento={paraTransferencia(ficha)}
-                transferencia={ficha.transferenciaPendente}
-                pode={{ confirmar: podeEntregar && pode(ator, "devolucao.registrar"), cancelar: pode(ator, "alocacao.cancelar") }}
-              />
+              <p className="mt-3 flex flex-wrap items-center gap-x-2 rounded-lg border border-atencao/30 bg-atencao-fundo px-3 py-2 text-[13px] text-titulo" data-testid="transferencia-reservada">
+                Transferência reservada para <strong>{ficha.transferenciaPendente.colaborador.nome}</strong>
+                {ficha.responsavel ? (
+                  <Link href={`/ti/alocacoes?alocacao=${ficha.responsavel.alocacaoId}`} className="font-semibold text-link underline-offset-4 hover:underline">
+                    Confirmar ou cancelar em Alocações
+                  </Link>
+                ) : null}
+              </p>
             ) : null}
           </Secao>
+          )}
+
+          {veTer ? (
+            <Secao titulo="Termos de entrega (TER)" icone={FileSignature}>
+              {ters.length ? (
+                <ul className="flex flex-col gap-3" data-testid="ters-equipamento">
+                  {ters.map((t) => (
+                    <li key={t.id} className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="min-w-0">
+                        <Link href={`/ti/documentos/ter?ter=${t.id}`} className="tabular font-semibold text-titulo underline-offset-4 hover:underline">
+                          {t.numero}
+                        </Link>
+                        <span className="block text-[12.5px] text-muted-foreground">
+                          {t.colaborador.nome}
+                          {t.entregueEm ? ` · entrega em ${formatarData(t.entregueEm)}` : ""}
+                          {t.alocacao ? ` · ${t.alocacao.numero}` : ""}
+                        </span>
+                      </span>
+                      <Estado grupo="ter" valor={t.situacao} />
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-[13px] text-muted-foreground">Nenhum TER emitido para entregas deste equipamento.</p>
+              )}
+            </Secao>
+          ) : null}
+
+          {componente ? null : (
+            <Secao titulo="Empresa e aluguel" icone={Building2}>
+              <EmpresaEAluguel ficha={ficha} />
+            </Secao>
           )}
 
           {ehNotebook ? (

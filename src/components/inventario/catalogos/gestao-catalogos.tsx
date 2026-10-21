@@ -1,6 +1,25 @@
 "use client";
 
-import { Ban, CheckCircle2, ChevronLeft, ChevronRight, Cpu, Layers, MemoryStick, MonitorCog, Package, Pencil, Plus, Tag, Trash2, type LucideIcon } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  Ban,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  ClipboardCheck,
+  Cpu,
+  Layers,
+  MemoryStick,
+  MonitorCog,
+  Package,
+  Pencil,
+  Plus,
+  ShieldAlert,
+  Tag,
+  Trash2,
+  type LucideIcon,
+} from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Fragment, useState } from "react";
@@ -9,6 +28,7 @@ import { CampoBusca } from "@/components/comum/campos";
 import { CabecalhoPagina } from "@/components/comum/pagina";
 import { SelecaoPersonalizada } from "@/components/comum/selecao-personalizada";
 import { StatusBadge } from "@/components/comum/status-badge";
+import { OrientacaoPergunta } from "@/components/inspecoes/checklist";
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -22,14 +42,18 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { chaveCatalogo, ROTULO_ABA_CATALOGO, ROTULO_PADRAO_MEMORIA, TIPOS_PADRAO_MEMORIA, type AbaCatalogo, type ItemCatalogo } from "@/lib/catalogos";
 import { ehComponente } from "@/lib/componentes";
-import { DESCRICAO_REGRA, exemploRegra } from "@/lib/identificacao";
+import { DESCRICAO_REGRA, exemploRegra, ROTULO_PARTE } from "@/lib/identificacao";
+import { ROTULO_APLICACAO } from "@/lib/inspecao";
 import { COM_CONFIGURACAO, nomeCarregador } from "@/lib/inventario";
 import { cn } from "@/lib/utils";
 import { acaoExcluirCategoria } from "@/server/acoes/categorias";
 import { acaoSituacaoCatalogo } from "@/server/acoes/catalogos";
+import { acaoMoverPergunta, acaoSituacaoPergunta } from "@/server/acoes/checklists";
 import type { ListaCatalogos } from "@/server/modulos/catalogos";
+import type { ListaChecklists, PerguntaGestao } from "@/server/modulos/checklists";
 import type { CategoriaCatalogo, ListaCategorias } from "@/server/modulos/categorias";
 import { DialogoCategoria } from "../categorias/dialogos-catalogo";
+import { DialogoPerguntaInspecao } from "./checklists-inspecao";
 import { DialogoMarca, DialogoModelo, DialogoPadraoMemoria, DialogoProcessador, DialogoSistema } from "./dialogos";
 import { DialogoModelosMarca } from "./dialogo-modelos-marca";
 
@@ -40,7 +64,15 @@ type Processador = ListaCatalogos["processadores"][number];
 type Sistema = ListaCatalogos["sistemas"][number];
 type Padrao = ListaCatalogos["memoria"][number];
 
-const ICONE_ABA: Record<AbaCatalogo, LucideIcon> = { categorias: Layers, marcas: Tag, modelos: Package, processadores: Cpu, sistemas: MonitorCog, memorias: MemoryStick };
+const ICONE_ABA: Record<AbaCatalogo, LucideIcon> = {
+  categorias: Layers,
+  marcas: Tag,
+  modelos: Package,
+  processadores: Cpu,
+  sistemas: MonitorCog,
+  memorias: MemoryStick,
+  checklists: ClipboardCheck,
+};
 const ROTULO_CADASTRAR: Record<AbaCatalogo, string> = {
   categorias: "Criar categoria",
   marcas: "Cadastrar marca",
@@ -48,6 +80,7 @@ const ROTULO_CADASTRAR: Record<AbaCatalogo, string> = {
   processadores: "Cadastrar processador",
   sistemas: "Cadastrar sistema",
   memorias: "Cadastrar padrão",
+  checklists: "Nova pergunta",
 };
 
 const th = "h-10 px-3 text-left align-middle text-[12.5px] font-semibold whitespace-nowrap text-muted-foreground first:pl-5 last:pr-5";
@@ -223,14 +256,26 @@ type Edicao =
   | { aba: "modelos"; item: Modelo | null }
   | { aba: "processadores"; item: Processador | null }
   | { aba: "sistemas"; item: Sistema | null }
-  | { aba: "memorias"; item: Padrao | null };
+  | { aba: "memorias"; item: Padrao | null }
+  | { aba: "checklists"; item: PerguntaGestao | null };
 
 /**
  * Catálogos do Inventário: categorias, marcas, modelos, processadores, sistemas operacionais e
- * padrões de memória. A aba fica no endereço (?aba=). Cadastrar, editar e ativar/inativar exige
- * "Gerenciar catálogos"; itens em uso não são excluídos.
+ * padrões de memória, e os checklists de inspeção de cada categoria. A aba fica no endereço
+ * (?aba=). Cadastrar, editar, reordenar e ativar/inativar exige "Gerenciar catálogos"; itens em
+ * uso não são excluídos (perguntas editadas viram nova versão).
  */
-export function GestaoCatalogos({ categorias: lista, catalogos, abaInicial }: { categorias: ListaCategorias; catalogos: ListaCatalogos; abaInicial: AbaCatalogo }) {
+export function GestaoCatalogos({
+  categorias: lista,
+  catalogos,
+  checklists,
+  abaInicial,
+}: {
+  categorias: ListaCategorias;
+  catalogos: ListaCatalogos;
+  checklists: ListaChecklists;
+  abaInicial: AbaCatalogo;
+}) {
   const router = useRouter();
   const [aba, setAba] = useState<AbaCatalogo>(abaInicial);
   const [busca, setBusca] = useState("");
@@ -242,7 +287,7 @@ export function GestaoCatalogos({ categorias: lista, catalogos, abaInicial }: { 
   const [marcaAberta, setMarcaAberta] = useState<{ id: string; nome: string } | null>(null);
   const [excluir, setExcluir] = useState<Categoria | null>(null);
   const [pendente, setPendente] = useState<string | null>(null);
-  const pode = lista.podeGerir && catalogos.podeGerir;
+  const pode = lista.podeGerir && catalogos.podeGerir && checklists.podeGerir;
   const prefixoNotebook = lista.categorias.find((c) => c.regra === "PROCESSADOR")?.prefixo ?? "NBI";
   const categoriasSimples = lista.categorias.map((c) => ({ id: c.id, nome: c.nome, ativa: c.ativa, tipo: c.tipo }));
 
@@ -275,6 +320,23 @@ export function GestaoCatalogos({ categorias: lista, catalogos, abaInicial }: { 
     setPendente(null);
     if (!r.ok) return toast.error(r.erro);
     toast.success(r.mensagem ?? "Situação atualizada.");
+    router.refresh();
+  }
+
+  async function situacaoPergunta(p: PerguntaGestao) {
+    setPendente(p.id);
+    const r = await acaoSituacaoPergunta(p.id, !p.ativa).catch(() => ({ ok: false as const, erro: "Não foi possível falar com o servidor. Tente novamente." }));
+    setPendente(null);
+    if (!r.ok) return toast.error(r.erro);
+    toast.success(r.mensagem);
+    router.refresh();
+  }
+
+  async function moverPergunta(p: PerguntaGestao, direcao: "acima" | "abaixo") {
+    setPendente(p.id);
+    const r = await acaoMoverPergunta(p.id, direcao).catch(() => ({ ok: false as const, erro: "Não foi possível falar com o servidor. Tente novamente." }));
+    setPendente(null);
+    if (!r.ok) return toast.error(r.erro);
     router.refresh();
   }
 
@@ -325,6 +387,12 @@ export function GestaoCatalogos({ categorias: lista, catalogos, abaInicial }: { 
   const processadores = filtrar(catalogos.processadores, busca, (p) => `${p.modelo} ${p.fabricante ?? ""} ${p.familia ?? ""}`, situacao, (p) => p.ativa);
   const sistemas = filtrar(catalogos.sistemas, busca, (s) => s.rotulo, situacao, (s) => s.ativa);
   const memoria = filtrar(catalogos.memoria, busca, (p) => p.valor, situacao, (p) => p.ativa).filter((p) => !filtroTipo || p.tipo === filtroTipo);
+  // Checklist da categoria escolhida (começa pelo notebook).
+  const categoriaChecklist = filtroCategoria || lista.categorias.find((c) => c.tipo === "NOTEBOOK")?.id || lista.categorias[0]?.id || "";
+  const perguntasCategoria = checklists.perguntas.filter((p) => p.categoriaId === categoriaChecklist).sort((a, b) => a.ordem - b.ordem);
+  const perguntas = filtrar(perguntasCategoria, busca, (p) => `${p.atual.texto} ${p.atual.grupo}`, situacao, (p) => p.ativa);
+  const totalPorCategoria = new Map<string, number>();
+  for (const p of checklists.perguntas) totalPorCategoria.set(p.categoriaId, (totalPorCategoria.get(p.categoriaId) ?? 0) + 1);
 
   const conteudo: Record<AbaCatalogo, React.ReactNode> = {
     categorias: (
@@ -552,6 +620,118 @@ export function GestaoCatalogos({ categorias: lista, catalogos, abaInicial }: { 
         />
       </>
     ),
+    checklists: (
+      <>
+        {comFiltros(
+          <div className="sm:w-60">
+            <SelecaoPersonalizada
+              valor={categoriaChecklist}
+              aoMudar={setFiltroCategoria}
+              opcoes={lista.categorias.map((c) => ({ valor: c.id, rotulo: c.nome, detalhe: qtd(totalPorCategoria.get(c.id) ?? 0, "pergunta", "perguntas") }))}
+              aria-label="Categoria do equipamento"
+              pesquisavel
+            />
+          </div>,
+        )}
+        <TabelaCatalogo
+          rotulo="Perguntas do checklist de inspeção"
+          linhas={perguntas}
+          vazio={
+            perguntasCategoria.length
+              ? "Nenhuma pergunta encontrada."
+              : "Esta categoria ainda não tem perguntas: as inspeções usam o checklist de Outro."
+          }
+          principal={(p) => p.atual.texto}
+          detalhe={(p) => (
+            <span className="inline-flex max-w-full items-center gap-1">
+              <OrientacaoPergunta pergunta={p.atual} />
+              <span className="truncate">
+                {p.ordem}. {p.atual.grupo} · {p.atual.obrigatoria ? "obrigatória" : "opcional"}
+                {p.atual.bloqueante ? " · bloqueante" : ""} · v{p.atual.versao}
+              </span>
+            </span>
+          )}
+          colunas={[
+            {
+              titulo: "Ordem",
+              classe: "w-32",
+              celula: (p) => (
+                <div className="flex items-center gap-0.5">
+                  <span className="tabular w-7 font-semibold text-titulo">{p.ordem}</span>
+                  {pode ? (
+                    <>
+                      <BotaoIcone rotulo={`Subir ${p.atual.texto}`} dica="Subir" icone={ArrowUp} aoClicar={() => void moverPergunta(p, "acima")} desabilitado={pendente === p.id || p.ordem <= 1} />
+                      <BotaoIcone
+                        rotulo={`Descer ${p.atual.texto}`}
+                        dica="Descer"
+                        icone={ArrowDown}
+                        aoClicar={() => void moverPergunta(p, "abaixo")}
+                        desabilitado={pendente === p.id || p.ordem >= perguntasCategoria.length}
+                      />
+                    </>
+                  ) : null}
+                </div>
+              ),
+            },
+            {
+              titulo: "Pergunta",
+              celula: (p) => (
+                <div className="flex min-w-0 items-start gap-1">
+                  <div className="min-w-0">
+                    <span className="block truncate font-semibold text-titulo" title={p.atual.texto}>
+                      {p.atual.texto}
+                    </span>
+                    <span className="block truncate text-[12.5px] text-muted-foreground">
+                      {p.atual.grupo} · {ROTULO_APLICACAO[p.atual.aplicacao]}
+                      {p.atual.partes.length ? ` · ${p.atual.partes.map((x) => ROTULO_PARTE[x]).join(", ")}` : ""}
+                    </span>
+                  </div>
+                  <OrientacaoPergunta pergunta={p.atual} />
+                </div>
+              ),
+            },
+            {
+              titulo: "Regras",
+              classe: "hidden w-48 @4xl:table-cell",
+              celula: (p) => (
+                <div className="flex flex-wrap gap-1">
+                  <StatusBadge tom="neutro">{p.atual.obrigatoria ? "Obrigatória" : "Opcional"}</StatusBadge>
+                  {p.atual.bloqueante ? (
+                    <StatusBadge tom="erro" icone={ShieldAlert}>
+                      Bloqueante
+                    </StatusBadge>
+                  ) : null}
+                </div>
+              ),
+            },
+            {
+              titulo: "Versão",
+              classe: "w-28",
+              celula: (p) => (
+                <>
+                  <span className="tabular font-semibold text-titulo">v{p.atual.versao}</span>
+                  <span className="block truncate text-[12px] text-muted-foreground">{qtd(p.usos, "resposta", "respostas")}</span>
+                </>
+              ),
+            },
+          ]}
+          acoes={(p) =>
+            pode ? (
+              <div className="flex justify-end gap-1">
+                <BotaoIcone rotulo={`Editar ${p.atual.texto}`} dica="Editar" icone={Pencil} aoClicar={() => setEditando({ aba: "checklists", item: p })} />
+                <BotaoIcone
+                  rotulo={`${p.ativa ? "Inativar" : "Ativar"} ${p.atual.texto}`}
+                  dica={p.ativa ? "Inativar" : "Ativar"}
+                  icone={p.ativa ? Ban : CheckCircle2}
+                  aoClicar={() => void situacaoPergunta(p)}
+                  desabilitado={pendente === p.id}
+                />
+              </div>
+            ) : null
+          }
+        />
+      </>
+    ),
   };
 
   return (
@@ -636,6 +816,16 @@ export function GestaoCatalogos({ categorias: lista, catalogos, abaInicial }: { 
           categorias={categoriasSimples.filter((c) => COM_CONFIGURACAO.some((t) => t === c.tipo) && (c.ativa || editando.item?.categoriaIds.includes(c.id)))}
           aoFechar={() => setEditando(null)}
           aoSalvar={(_s, msg) => concluir(msg)}
+        />
+      ) : null}
+      {editando?.aba === "checklists" ? (
+        <DialogoPerguntaInspecao
+          pergunta={editando.item}
+          categorias={lista.categorias.map((c) => ({ id: c.id, nome: c.nome, ativa: c.ativa, tipo: c.tipo }))}
+          categoriaInicial={categoriaChecklist}
+          grupos={[...new Set(perguntasCategoria.map((p) => p.atual.grupo))]}
+          aoFechar={() => setEditando(null)}
+          aoSalvar={(msg) => concluir(msg)}
         />
       ) : null}
       {editando?.aba === "memorias" ? (

@@ -58,10 +58,13 @@ const esquema = z.object({
   aplicar: lista,
   criarContaMicrosoft: z.boolean(),
   removerFoto: z.boolean(),
+  /** Vazio na edição: mantém o CPF atual (o número nunca volta ao navegador). */
+  cpf: texto(14).optional(),
 });
 
 /** Erro do servidor no campo certo do formulário. */
 function campoDoErro(mensagem: string): string | null {
+  if (/CPF/.test(mensagem)) return "cpf";
   if (/senha/i.test(mensagem)) return "senhaInicial";
   if (/segundo nome/i.test(mensagem)) return "segundoNome";
   if (/sobrenome/i.test(mensagem)) return "sobrenomeUtilizado";
@@ -97,6 +100,7 @@ export async function acaoSalvarPessoa(_a: EstadoPessoa, formData: FormData): Pr
     aplicar: valor("aplicar"),
     criarContaMicrosoft: formData.get("criarContaMicrosoft") === "on",
     removerFoto: formData.get("removerFoto") === "sim",
+    cpf: valor("cpf"),
   });
   if (!dados.success) {
     const campos = z.flattenError(dados.error).fieldErrors as Record<string, string[] | undefined>;
@@ -115,13 +119,16 @@ export async function acaoSalvarPessoa(_a: EstadoPessoa, formData: FormData): Pr
     situacao: d.situacao,
     grupoLicencaId: d.grupoLicencaId ?? null,
     foto,
+    cpf: d.cpf ?? null,
   };
 
   try {
     if (d.id) {
       const r = await editarPessoa(ator, { ...identificacao, colaboradorId: d.id, aplicar: d.aplicar, removerFoto: d.removerFoto });
       revalidatePath("/ti/cadastros/pessoas");
-      return { ok: true, colaboradorId: r.id, mensagem: `${r.nome}: cadastro atualizado.` };
+      revalidatePath("/ti/documentos/ter");
+      const ters = r.tersGerados ? ` ${r.tersGerados === 1 ? "1 TER pendente foi processado" : `${r.tersGerados} TERs pendentes foram processados`}.` : "";
+      return { ok: true, colaboradorId: r.id, mensagem: `${r.nome}: cadastro atualizado.${ters}` };
     }
     // A senha inicial é calculada no servidor (fórmula da planilha); o navegador não a envia.
     const r = await cadastrarPessoa(ator, {

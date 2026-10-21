@@ -268,6 +268,12 @@ export async function excluirCategoria(ator: Ator, entrada: { id: string }) {
       if (c.sistema) throw new ErroNegocio("Categorias do catálogo inicial não são excluídas; inative-a se não for mais usada.");
       if (c._count.ativos || c._count.kits) throw new ErroNegocio("A categoria tem equipamentos vinculados: inative-a em vez de excluir.");
       if (c._count.prefixos) throw new ErroNegocio("A categoria tem histórico de abreviações: inative-a em vez de excluir.");
+      // Sem equipamentos, nenhuma inspeção respondeu ao checklist da categoria: ele sai junto.
+      const perguntas = (await tx.perguntaInspecao.findMany({ where: { categoriaId: c.id }, select: { id: true } })).map((p) => p.id);
+      if (perguntas.length) {
+        await tx.versaoPerguntaInspecao.deleteMany({ where: { perguntaId: { in: perguntas } } });
+        await tx.perguntaInspecao.deleteMany({ where: { id: { in: perguntas } } });
+      }
       await tx.categoriaEquipamento.delete({ where: { id: c.id } });
       await registrarAuditoria(tx, auditar(ator, origem, "categoria.excluir", { tipo: "categoria_equipamento", id: c.id, descricao: c.nome }, { prefixo: c.prefixo }));
       return { nome: c.nome };

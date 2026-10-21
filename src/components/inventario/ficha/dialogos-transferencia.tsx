@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { AlertaFormulario, Campo } from "@/components/comum/campos";
 import { SelecaoPersonalizada } from "@/components/comum/selecao-personalizada";
 import { MODAL_CENTRALIZADO } from "@/components/empresas/posicao-modal";
+import { errosVerificacao, montarVerificacoes, useCondicoesEntrega, VerificacaoCondicoes, type Decisoes } from "@/components/inspecoes/verificacao-entrega";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -37,13 +38,15 @@ export type EquipamentoTransferencia = {
   descricao: string;
   empresa: { id: string; nome: string; sigla: string };
   /** Quem está com o equipamento (alocação ativa); nulo: em estoque. */
-  responsavel: { id: string; nome: string; alocacao: string; alocacaoId: string } | null;
+  responsavel: { id: string; nome: string; alocacao: string; alocacaoId: string; empresa?: { id: string; nome: string; sigla: string } } | null;
+  /** Empresa que pode receber o equipamento: a locatária (aluguel vigente) ou a proprietária. */
+  empresaAutorizada: { id: string; nome: string; sigla: string };
   /** Carregadores vinculados (não desvinculados). */
   carregadores: { id: string; nome: string | null; patrimonio: string | null; situacao: string }[];
 };
 
-/** Resposta da ação: aviso, atualização da tela e fechamento. */
-function useConcluir(aoMudar: (v: boolean) => void) {
+/** Resposta da ação: aviso, atualização da tela e fechamento (e `aoConcluir`, de quem abriu o diálogo). */
+function useConcluir(aoMudar: (v: boolean) => void, aoConcluir?: () => void) {
   const router = useRouter();
   return (r: Resultado, setErro: (e: string | null) => void) => {
     if (!r.ok) {
@@ -53,6 +56,7 @@ function useConcluir(aoMudar: (v: boolean) => void) {
     toast.success(r.mensagem);
     router.refresh();
     aoMudar(false);
+    aoConcluir?.();
   };
 }
 
@@ -99,21 +103,24 @@ function Confirmacao({ marcado, aoMudar, erro, children }: { marcado: boolean; a
 
 /**
  * Transferência de colaborador. Com entrega física: encerra a alocação anterior e cria a nova
- * na mesma operação. Sem entrega: só a reserva, e a custódia atual continua (Q-27). Em
- * estoque, é a entrega ou a reserva de uma nova alocação.
+ * na mesma operação, com a mesma verificação técnica de uma nova alocação (cada item entregue
+ * confirma a última inspeção ou passa por uma nova). Sem entrega: só a reserva, e a custódia
+ * atual continua (Q-27). Em estoque, é a entrega ou a reserva de uma nova alocação.
  */
 export function DialogoTransferirColaborador({
   aberto,
   aoMudar,
   equipamento,
   podeEntregar,
+  aoConcluir,
 }: {
   aberto: boolean;
   aoMudar: (v: boolean) => void;
   equipamento: EquipamentoTransferencia;
   podeEntregar: boolean;
+  aoConcluir?: () => void;
 }) {
-  const concluir = useConcluir(aoMudar);
+  const concluir = useConcluir(aoMudar, aoConcluir);
   const r = equipamento.responsavel;
   const [colaboradores, setColaboradores] = useState<ColaboradorTransferencia[] | null>(null);
   const [erroCarga, setErroCarga] = useState<string | null>(null);
@@ -128,6 +135,8 @@ export function DialogoTransferirColaborador({
   const [erro, setErro] = useState<string | null>(null);
   const [enviando, setEnviando] = useState(false);
   const [chave] = useState(() => crypto.randomUUID());
+  const [decisoes, setDecisoes] = useState<Decisoes>({});
+  const [errosCondicao, setErrosCondicao] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (!aberto) return;
@@ -148,6 +157,9 @@ export function DialogoTransferirColaborador({
   const entregar = modo === "ENTREGAR";
   // Carregadores entregues com o notebook (ou disponíveis, saindo do estoque) acompanham a transferência.
   const acompanham = equipamento.carregadores.filter((c) => c.situacao === (r ? "ALOCADO" : "DISPONIVEL"));
+  // Entrega física: cada item entregue (o equipamento e os carregadores) passa pela verificação técnica.
+  const verificar = entregar && Boolean(r);
+  const { condicoes, erro: erroCondicoes, recarregar } = useCondicoesEntrega([equipamento.id, ...acompanham.map((c) => c.id)], aberto && verificar);
 
   async function confirmar() {
     const e: Record<string, string> = {};
@@ -155,21 +167,31 @@ export function DialogoTransferirColaborador({
     if (entregar && !quando) e.data = "Informe a data da transferência.";
     if (!entregar && prevista && prevista < hoje()) e.data = "A data prevista não pode estar no passado.";
     if (entregar && r && !confirmado) e.confirmacao = "Confirme a devolução e a entrega física do equipamento.";
+    const condicao = verificar && condicoes ? errosVerificacao(condicoes, decisoes) : {};
+    setErrosCondicao(condicao);
+    if (Object.keys(condicao).length) e.verificacao = "Confirme a condição de cada equipamento antes da entrega.";
     setErros(e);
-    if (Object.keys(e).length) return;
+    setErro(e.verificacao ?? null);
+    if (Object.keys(e).length || (verificar && !condicoes)) return;
+    const envio = verificar && condicoes ? montarVerificacoes(condicoes, decisoes) : null;
     setEnviando(true);
     setErro(null);
-    const res = await acaoTransferirColaborador({
-      ativoId: equipamento.id,
-      colaboradorId,
-      modo,
-      data: entregar ? localParaIso(quando) : prevista || null,
-      observacoes: observacoes || null,
-      confirmacaoFisica: entregar && Boolean(r) ? confirmado : undefined,
-      alocacaoAtualId: r?.alocacaoId ?? null,
-      chaveRequisicao: chave,
-    }).catch(() => SEM_CONEXAO);
+    const res = await acaoTransferirColaborador(
+      {
+        ativoId: equipamento.id,
+        colaboradorId,
+        modo,
+        data: entregar ? localParaIso(quando) : prevista || null,
+        observacoes: observacoes || null,
+        confirmacaoFisica: entregar && Boolean(r) ? confirmado : undefined,
+        alocacaoAtualId: r?.alocacaoId ?? null,
+        chaveRequisicao: chave,
+        verificacoes: envio?.verificacoes,
+      },
+      envio?.anexos,
+    ).catch(() => SEM_CONEXAO);
     setEnviando(false);
+    if (!res.ok && /inspeç|condição/i.test(res.erro)) recarregar();
     concluir(res, setErro);
   }
 
@@ -220,8 +242,11 @@ export function DialogoTransferirColaborador({
                     setColaboradorId(v);
                     setErros((x) => ({ ...x, colaborador: "" }));
                   }}
-                  // O colaborador atual não aparece: transferir para ele mesmo não é permitido.
-                  opcoes={colaboradores.filter((c) => c.id !== r?.id).map((c) => ({ valor: c.id, rotulo: c.nome, detalhe: c.empresa.sigla }))}
+                  // Só colaboradores da empresa que pode usar o equipamento (proprietária ou locatária);
+                  // o atual não aparece: transferir para ele mesmo não é permitido.
+                  opcoes={colaboradores
+                    .filter((c) => c.id !== r?.id && c.empresa.id === equipamento.empresaAutorizada.id)
+                    .map((c) => ({ valor: c.id, rotulo: c.nome, detalhe: c.empresa.sigla }))}
                   placeholder="Selecione o colaborador"
                   pesquisavel
                 />
@@ -285,6 +310,20 @@ export function DialogoTransferirColaborador({
             )}
           </div>
 
+          {verificar ? (
+            <VerificacaoCondicoes
+              condicoes={condicoes}
+              erro={erroCondicoes}
+              aoTentarDeNovo={recarregar}
+              decisoes={decisoes}
+              aoMudar={(id, d) => {
+                setDecisoes((x) => ({ ...x, [id]: d }));
+                setErrosCondicao((x) => ({ ...x, [id]: "" }));
+              }}
+              erros={errosCondicao}
+            />
+          ) : null}
+
           <Campo rotulo="Observação ou motivo">
             {(p) => <Textarea {...p} value={observacoes} onChange={(e) => setObservacoes(e.target.value)} maxLength={1000} rows={2} />}
           </Campo>
@@ -306,7 +345,7 @@ export function DialogoTransferirColaborador({
           <Button type="button" variant="secondary" disabled={enviando} onClick={() => aoMudar(false)}>
             Cancelar
           </Button>
-          <Button type="button" carregando={enviando} rotuloCarregando="Registrando…" onClick={() => void confirmar()} disabled={!colaboradores}>
+          <Button type="button" carregando={enviando} rotuloCarregando="Registrando…" onClick={() => void confirmar()} disabled={!colaboradores || (verificar && !condicoes)}>
             {entregar ? "Confirmar transferência" : "Reservar transferência"}
           </Button>
         </DialogFooter>
@@ -324,29 +363,43 @@ export function DialogoConfirmarTransferencia({
   aoMudar,
   equipamento,
   transferencia,
+  aoConcluir,
 }: {
   aberto: boolean;
   aoMudar: (v: boolean) => void;
   equipamento: EquipamentoTransferencia;
   transferencia: TransferenciaReservada;
+  aoConcluir?: () => void;
 }) {
-  const concluir = useConcluir(aoMudar);
+  const concluir = useConcluir(aoMudar, aoConcluir);
   const r = equipamento.responsavel;
   const [quando, setQuando] = useState(() => agoraLocal());
   const [confirmado, setConfirmado] = useState(false);
   const [erroConfirmacao, setErroConfirmacao] = useState<string | null>(null);
   const [erro, setErro] = useState<string | null>(null);
   const [enviando, setEnviando] = useState(false);
+  const [decisoes, setDecisoes] = useState<Decisoes>({});
+  const [errosCondicao, setErrosCondicao] = useState<Record<string, string>>({});
+  // A entrega física da reserva tem a mesma verificação técnica de uma nova alocação.
+  const entregues = [equipamento.id, ...equipamento.carregadores.filter((c) => c.situacao === "ALOCADO").map((c) => c.id)];
+  const { condicoes, erro: erroCondicoes, recarregar } = useCondicoesEntrega(entregues, aberto);
 
   async function confirmar() {
-    if (!confirmado) {
-      setErroConfirmacao("Confirme a devolução e a entrega física do equipamento.");
-      return;
-    }
+    if (!condicoes) return;
+    const condicao = errosVerificacao(condicoes, decisoes);
+    setErrosCondicao(condicao);
+    setErro(Object.keys(condicao).length ? "Confirme a condição de cada equipamento antes da entrega." : null);
+    if (!confirmado) setErroConfirmacao("Confirme a devolução e a entrega física do equipamento.");
+    if (!confirmado || Object.keys(condicao).length) return;
+    const { verificacoes, anexos } = montarVerificacoes(condicoes, decisoes);
     setEnviando(true);
     setErro(null);
-    const res = await acaoConfirmarTransferencia({ ativoId: equipamento.id, transferenciaId: transferencia.id, data: localParaIso(quando), confirmacaoFisica: true }).catch(() => SEM_CONEXAO);
+    const res = await acaoConfirmarTransferencia(
+      { ativoId: equipamento.id, transferenciaId: transferencia.id, data: localParaIso(quando), confirmacaoFisica: true, verificacoes },
+      anexos,
+    ).catch(() => SEM_CONEXAO);
     setEnviando(false);
+    if (!res.ok && /inspeç|condição/i.test(res.erro)) recarregar();
     concluir(res, setErro);
   }
 
@@ -367,6 +420,17 @@ export function DialogoConfirmarTransferencia({
               {(p) => <Input {...p} type="datetime-local" value={quando} max={agoraLocal()} onChange={(e) => setQuando(e.target.value)} />}
             </Campo>
           </div>
+          <VerificacaoCondicoes
+            condicoes={condicoes}
+            erro={erroCondicoes}
+            aoTentarDeNovo={recarregar}
+            decisoes={decisoes}
+            aoMudar={(id, d) => {
+              setDecisoes((x) => ({ ...x, [id]: d }));
+              setErrosCondicao((x) => ({ ...x, [id]: "" }));
+            }}
+            erros={errosCondicao}
+          />
           <Confirmacao
             marcado={confirmado}
             aoMudar={(v) => {
@@ -382,7 +446,7 @@ export function DialogoConfirmarTransferencia({
           <Button type="button" variant="secondary" disabled={enviando} onClick={() => aoMudar(false)}>
             Cancelar
           </Button>
-          <Button type="button" carregando={enviando} rotuloCarregando="Registrando…" onClick={() => void confirmar()}>
+          <Button type="button" carregando={enviando} rotuloCarregando="Registrando…" disabled={!condicoes} onClick={() => void confirmar()}>
             Confirmar transferência
           </Button>
         </DialogFooter>
@@ -396,13 +460,15 @@ export function DialogoCancelarTransferencia({
   aoMudar,
   equipamento,
   transferencia,
+  aoConcluir,
 }: {
   aberto: boolean;
   aoMudar: (v: boolean) => void;
   equipamento: EquipamentoTransferencia;
   transferencia: TransferenciaReservada;
+  aoConcluir?: () => void;
 }) {
-  const concluir = useConcluir(aoMudar);
+  const concluir = useConcluir(aoMudar, aoConcluir);
   const [motivo, setMotivo] = useState("");
   const [erroMotivo, setErroMotivo] = useState<string | null>(null);
   const [erro, setErro] = useState<string | null>(null);
@@ -527,7 +593,8 @@ export function DialogoTransferirEmpresa({
                 <p className="flex items-start gap-2 rounded-lg border border-info/25 bg-info-fundo px-3.5 py-2.5 text-[13px] text-foreground" role="note">
                   <Info className="mt-0.5 size-4 shrink-0 text-info" aria-hidden />
                   <span>
-                    A alteração de propriedade não modifica quem está com o equipamento: continua com <strong>{r.nome}</strong> ({r.alocacao}).
+                    Está com <strong>{r.nome}</strong>
+                    {r.empresa ? ` (${r.empresa.sigla})` : ""}, {r.alocacao}. A propriedade só pode passar para a empresa dessa pessoa; para outra, registre a devolução antes.
                   </span>
                 </p>
               ) : null}
@@ -646,15 +713,17 @@ export function DialogoTransferirEmpresa({
   );
 }
 
-/** Aviso da transferência reservada na ficha, com as ações de confirmar e cancelar. */
+/** Aviso da transferência reservada (no detalhe da alocação), com as ações de confirmar e cancelar. */
 export function AvisoTransferenciaReservada({
   equipamento,
   transferencia,
   pode,
+  aoConcluir,
 }: {
   equipamento: EquipamentoTransferencia;
   transferencia: TransferenciaReservada & { registradaEm: string; registradaPorNome: string };
   pode: { confirmar: boolean; cancelar: boolean };
+  aoConcluir?: () => void;
 }) {
   const [aberto, setAberto] = useState<"confirmar" | "cancelar" | null>(null);
   const [chave, setChave] = useState(0);
@@ -685,8 +754,22 @@ export function AvisoTransferenciaReservada({
           ) : null}
         </div>
       ) : null}
-      <DialogoConfirmarTransferencia key={`c${chave}`} aberto={aberto === "confirmar"} aoMudar={mudar("confirmar")} equipamento={equipamento} transferencia={transferencia} />
-      <DialogoCancelarTransferencia key={`x${chave}`} aberto={aberto === "cancelar"} aoMudar={mudar("cancelar")} equipamento={equipamento} transferencia={transferencia} />
+      <DialogoConfirmarTransferencia
+        key={`c${chave}`}
+        aberto={aberto === "confirmar"}
+        aoMudar={mudar("confirmar")}
+        equipamento={equipamento}
+        transferencia={transferencia}
+        aoConcluir={aoConcluir}
+      />
+      <DialogoCancelarTransferencia
+        key={`x${chave}`}
+        aberto={aberto === "cancelar"}
+        aoMudar={mudar("cancelar")}
+        equipamento={equipamento}
+        transferencia={transferencia}
+        aoConcluir={aoConcluir}
+      />
     </div>
   );
 }
