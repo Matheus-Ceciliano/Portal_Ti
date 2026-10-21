@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import type { Perfil } from "@/generated/prisma/client";
 import { gerarHashSenha } from "@/server/auth/senha";
+import { protegerCpf } from "@/server/cpf";
 import { EMPRESAS, PESSOAS } from "@/server/dados-ficticios/cadastros";
 import { semearInventario } from "@/server/dados-ficticios/inventario";
 import { prisma } from "@/server/db";
@@ -21,6 +22,19 @@ export async function familiaId(codigo: "3" | "5" | "7") {
 }
 
 export const senhaAleatoria = () => `Teste-${randomBytes(12).toString("base64url")}`;
+
+/** CPF fictício gerado para o teste (dígitos verificadores corretos; nenhum dado real). */
+export function cpfFicticio() {
+  const base = Array.from({ length: 9 }, () => Math.floor(Math.random() * 10));
+  if (new Set(base).size === 1) base[0] = (base[0] + 1) % 10;
+  const dv = (nums: number[]) => {
+    const peso = nums.length + 1;
+    const r = (nums.reduce((s, d, i) => s + d * (peso - i), 0) * 10) % 11;
+    return r === 10 ? 0 : r;
+  };
+  const d1 = dv(base);
+  return [...base, d1, dv([...base, d1])].join("");
+}
 
 export async function criarEmpresa() {
   const sufixo = randomBytes(3).toString("hex");
@@ -44,6 +58,8 @@ type OpcoesPessoa = {
   colaboradorExistente?: boolean;
   /** Empresa do colaborador (padrão: uma empresa nova só dele). */
   empresaId?: string;
+  /** CPF (cifrado como no cadastro); `true` gera um fictício. */
+  cpf?: string | true;
 };
 
 /** Cria colaborador + conta com credencial. "ativada" simula senha pessoal e ativação de TI concluídas. */
@@ -61,6 +77,7 @@ export async function criarPessoa(opcoes: OpcoesPessoa = {}) {
           cargo: "Analista",
           departamento: "TI",
           empresaId: opcoes.empresaId ?? (await criarEmpresa()).id,
+          ...(opcoes.cpf ? protegerCpf(opcoes.cpf === true ? cpfFicticio() : opcoes.cpf) : {}),
         },
       });
   const email = colaborador.emailCorporativo;

@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowLeftRight, CheckCircle2, ClipboardCheck, FileCheck2, FileText, FileUp, Info, PackageCheck, RotateCw, Undo2, UserRound, XCircle } from "lucide-react";
+import { ArrowLeftRight, CheckCircle2, ClipboardCheck, FileCheck2, FileText, Info, PackageCheck, RotateCw, Undo2, UserRound, XCircle } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
@@ -22,7 +22,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { ROTULO_DESTINO_DEVOLUCAO, ROTULO_ESTADO_FISICO, ROTULO_MOVIMENTACAO, ROTULO_SITUACAO, type Situacao } from "@/lib/inventario";
 import { cn } from "@/lib/utils";
-import { acaoCancelarReserva, acaoConfirmarEntrega, acaoDetalheAlocacao, acaoRegistrarTerAssinado } from "@/server/acoes/alocacoes";
+import { acaoCancelarReserva, acaoConfirmarEntrega, acaoDetalheAlocacao } from "@/server/acoes/alocacoes";
 import type { DetalheAlocacaoReal } from "@/server/modulos/alocacoes";
 import { DialogoDevolucao } from "./dialogo-devolucao";
 import { DialogoTransferirDaAlocacao, transferiveis } from "./dialogo-transferir-alocacao";
@@ -32,7 +32,8 @@ export type PermissoesAlocacao = {
   confirmar: boolean;
   cancelar: boolean;
   devolver: boolean;
-  anexarTer: boolean;
+  /** Abrir o TER na aba TER (envio, PDF assinado e conferência ficam lá). */
+  verTer: boolean;
   /** Transferir equipamento para outro colaborador (só em alocação ativa). */
   transferir?: boolean;
   /** Fazer a avaliação técnica do equipamento devolvido. */
@@ -134,6 +135,7 @@ function Conteudo({ inicial, pode, destacarAtivo }: { inicial: AlocacaoCabecalho
   const d = resposta?.ok ? resposta.dados : null;
   const estado = d?.estado ?? inicial.estado;
   const ter = d?.termos.find((t) => t.tipo === "TER" && t.estado !== "CANCELADO") ?? null;
+  const terPortal = d?.termos.find((t) => t.tipo === "TER" && t.situacao) ?? null;
   const abertos = d?.itens.filter((i) => i.aberto) ?? [];
 
   return (
@@ -149,7 +151,9 @@ function Conteudo({ inicial, pode, destacarAtivo }: { inicial: AlocacaoCabecalho
               <span className="font-semibold text-titulo">{d?.colaborador.nome ?? inicial.colaborador}</span>
               {d ? <span>{d.empresaColaborador.nome}</span> : null}
               <Estado grupo="alocacao" valor={estado} />
-              {d && estado !== "RESERVADA" && estado !== "CANCELADA" ? <BadgeTer estado={ter?.estado ?? null} /> : null}
+              {d && estado !== "RESERVADA" && estado !== "CANCELADA" ? (
+                terPortal?.situacao ? <Estado grupo="ter" valor={terPortal.situacao} /> : <BadgeTer estado={ter?.estado ?? null} />
+              ) : null}
             </div>
           </DialogDescription>
         </DialogHeader>
@@ -303,7 +307,7 @@ function Conteudo({ inicial, pode, destacarAtivo }: { inicial: AlocacaoCabecalho
             </TabsContent>
 
             <TabsContent value="documentos" className="flex flex-col gap-4">
-              <Documentos dados={d} podeAnexar={pode.anexarTer} aoMudar={recarregar} />
+              <Documentos dados={d} podeVerTer={pode.verTer} />
             </TabsContent>
 
             <TabsContent value="historico">
@@ -378,48 +382,48 @@ function Conteudo({ inicial, pode, destacarAtivo }: { inicial: AlocacaoCabecalho
   );
 }
 
-function Documentos({ dados, podeAnexar, aoMudar }: { dados: DetalheAlocacaoReal; podeAnexar: boolean; aoMudar: () => void }) {
-  const [arquivo, setArquivo] = useState<File | null>(null);
-  const [erro, setErro] = useState<string | null>(null);
-  const [enviando, setEnviando] = useState(false);
+/**
+ * TER da alocação: o emitido pelo portal (um por entrega física) e registros anteriores. O status
+ * do TER não muda a entrega física; envio, PDF assinado e conferência ficam na aba TER.
+ */
+function Documentos({ dados, podeVerTer }: { dados: DetalheAlocacaoReal; podeVerTer: boolean }) {
   const entregue = dados.estado === "ATIVA" || dados.estado === "ENCERRADA";
-  const assinado = dados.termos.some((t) => t.tipo === "TER" && t.estado === "ASSINADO");
-
-  async function enviar() {
-    if (!arquivo) return setErro("Selecione o PDF do termo assinado.");
-    if (arquivo.size > 10 * 1024 * 1024) return setErro("O PDF pode ter no máximo 10 MB.");
-    setEnviando(true);
-    const dadosForm = new FormData();
-    dadosForm.set("alocacaoId", dados.id);
-    dadosForm.set("pdf", arquivo);
-    const r = await acaoRegistrarTerAssinado(dadosForm).catch(() => ({ ok: false as const, erro: FALHA }));
-    setEnviando(false);
-    if (!r.ok) return setErro(r.erro);
-    toast.success(r.mensagem);
-    setArquivo(null);
-    setErro(null);
-    aoMudar();
-  }
-
   return (
     <>
       {dados.termos.length === 0 ? (
         <p className="flex items-center gap-2 text-[13px] text-muted-foreground">
-          <FileText className="size-4" aria-hidden /> Nenhum TER registrado para esta alocação.
+          <FileText className="size-4" aria-hidden />
+          {entregue ? "Nenhum TER para esta alocação: entregas anteriores à emissão automática não têm termo gerado." : "O TER é gerado automaticamente na entrega física."}
         </p>
       ) : (
-        <ul className="divide-y rounded-xl border">
+        <ul className="divide-y rounded-xl border" data-testid="termos-alocacao">
           {dados.termos.map((t) => (
             <li key={t.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
               <span className="min-w-0 flex-1">
-                <span className="tabular block font-semibold text-titulo">{t.numero}</span>
+                <span className="tabular block font-semibold text-titulo">
+                  {t.numero}
+                  {t.situacao && t.versao && t.versao > 1 ? <span className="font-normal text-muted-foreground"> · versão {t.versao}</span> : null}
+                </span>
                 <span className="block text-[12.5px] text-muted-foreground">
-                  {t.emitidoEm ? `Emitido em ${formatarData(t.emitidoEm)}` : "Recebido assinado"}
-                  {t.assinadoEm ? ` · PDF assinado registrado em ${formatarDataHora(t.assinadoEm)} por ${t.assinadoPorNome}` : ""}
+                  {t.emitidoEm ? `Emitido em ${formatarDataHora(t.emitidoEm)}` : t.situacao ? "PDF ainda não emitido" : "Recebido assinado"}
+                  {t.assinadoEm ? ` · assinatura conferida em ${formatarDataHora(t.assinadoEm)} por ${t.assinadoPorNome}` : ""}
                 </span>
               </span>
-              <Estado grupo="termo" valor={t.estado} />
-              {t.temPdf ? (
+              {t.situacao ? <Estado grupo="ter" valor={t.situacao} /> : <Estado grupo="termo" valor={t.estado} />}
+              {t.situacao && podeVerTer ? (
+                <Button asChild variant="secondary" size="sm">
+                  <Link href={`/ti/documentos/ter?ter=${t.id}`}>
+                    <FileText aria-hidden /> Abrir na aba TER
+                  </Link>
+                </Button>
+              ) : null}
+              {t.temPdfEmitido ? (
+                <Button asChild variant="ghost" size="sm">
+                  <a href={`/api/termos/${t.id}/pdf?arquivo=emitido`} target="_blank" rel="noopener">
+                    <FileCheck2 aria-hidden /> PDF emitido
+                  </a>
+                </Button>
+              ) : !t.situacao && t.temPdf ? (
                 <Button asChild variant="secondary" size="sm">
                   <a href={`/api/termos/${t.id}/pdf`} target="_blank" rel="noopener">
                     <FileCheck2 aria-hidden /> Abrir PDF
@@ -430,33 +434,11 @@ function Documentos({ dados, podeAnexar, aoMudar }: { dados: DetalheAlocacaoReal
           ))}
         </ul>
       )}
-      {podeAnexar && entregue && !assinado ? (
-        <section aria-label="Registrar TER assinado" className="rounded-xl border p-4">
-          <h3 className="text-[13px] font-bold text-titulo">Registrar TER assinado</h3>
-          <p className="mt-0.5 text-[12.5px] text-muted-foreground">PDF assinado fora do portal (GOV.BR). O documento só fica como assinado com o PDF guardado.</p>
-          {erro ? (
-            <div className="mt-2">
-              <AlertaFormulario tom="erro">{erro}</AlertaFormulario>
-            </div>
-          ) : null}
-          <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
-            <Input
-              type="file"
-              accept="application/pdf"
-              aria-label="PDF do termo assinado"
-              onChange={(e) => {
-                setArquivo(e.target.files?.[0] ?? null);
-                setErro(null);
-              }}
-              className="sm:max-w-sm"
-            />
-            <Button variant="secondary" carregando={enviando} rotuloCarregando="Enviando…" onClick={() => void enviar()}>
-              <FileUp aria-hidden /> Registrar PDF
-            </Button>
-          </div>
-        </section>
+      {entregue ? (
+        <p className="flex items-start gap-2 rounded-lg bg-muted px-3 py-2 text-[12.5px] text-muted-foreground">
+          <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />O status do TER não altera a entrega física. Envio para assinatura, PDF assinado e conferência ficam na aba TER.
+        </p>
       ) : null}
-      {!entregue ? <p className="text-[12.5px] text-muted-foreground">O TER assinado é registrado depois da entrega física.</p> : null}
     </>
   );
 }

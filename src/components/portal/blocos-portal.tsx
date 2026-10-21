@@ -1,9 +1,11 @@
-import { BookOpenText, FileText, Headset, Laptop } from "lucide-react";
+import { AlertTriangle, BookOpenText, FileSignature, FileText, Headset, Laptop } from "lucide-react";
+import Link from "next/link";
 import { EstadoVazio, formatarData, formatarDataHora } from "@/components/comum/pagina";
 import { Estado } from "@/components/comum/status-badge";
 import { ICONE_CATEGORIA } from "@/components/inventario/visual";
 import type { ChamadoFicticio, TutorialFicticio } from "@/server/dados-ficticios/operacao";
 import type { MeuEquipamento } from "@/server/modulos/consultas";
+import type { MeuTer } from "@/server/modulos/ter-colaborador";
 import type { listarMeusDocumentos } from "@/server/modulos/termos";
 
 type MeuDocumento = Awaited<ReturnType<typeof listarMeusDocumentos>>[number];
@@ -113,6 +115,47 @@ export function ListaDocumentos({ itens }: { itens: MeuDocumento[] }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+/** Início do portal: os termos que pedem a assinatura primeiro, com o aviso de pendência. */
+export function ResumoMeusTermos({ itens }: { itens: MeuTer[] }) {
+  if (itens.length === 0) {
+    return <EstadoVazio icone={FileSignature} titulo="Nenhum termo" descricao="Você ainda não possui termos de responsabilidade disponíveis." />;
+  }
+  const pendentes = itens.filter((t) => t.podeEnviar);
+  const ordenados = [...pendentes, ...itens.filter((t) => !t.podeEnviar)].slice(0, 4);
+  return (
+    <div className="flex flex-col gap-3">
+      {pendentes.length ? (
+        <p className="flex items-start gap-2 rounded-lg border border-atencao/30 bg-atencao-fundo px-3 py-2 text-[13.5px] text-atencao" role="status" data-testid="aviso-termos-inicio">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
+          {pendentes.length === 1 ? "1 termo aguarda sua assinatura." : `${pendentes.length} termos aguardam sua assinatura.`}
+        </p>
+      ) : null}
+      <ul className="divide-y rounded-2xl border bg-card shadow-nivel-1">
+        {ordenados.map((t) => (
+          <li key={t.id} className={t.podeEnviar ? "border-l-[3px] border-l-atencao" : undefined}>
+            <Link href={`/portal/termos?ter=${t.id}`} className="flex flex-col gap-2 px-4 py-3 hover:bg-accent/40 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+              <span className="flex min-w-0 items-start gap-3">
+                <FileSignature className="mt-0.5 size-5 shrink-0 text-muted-foreground" aria-hidden />
+                <span className="min-w-0">
+                  <span className="tabular block font-medium text-titulo">
+                    {t.numero} <span className="font-normal text-muted-foreground">· versão {t.versao}</span>
+                  </span>
+                  <span className="block truncate text-[13px] text-muted-foreground">
+                    Entrega em {formatarData(t.entregueEm)} · {t.equipamentos.join(", ")}
+                  </span>
+                </span>
+              </span>
+              <span className="self-start sm:self-center">
+                <Estado grupo="terColaborador" valor={t.situacao} />
+              </span>
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

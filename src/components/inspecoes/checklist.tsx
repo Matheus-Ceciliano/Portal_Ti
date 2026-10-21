@@ -287,7 +287,7 @@ function LinhaPergunta({
             })}
           </div>
           {/* Observação (em "Conforme") e foto de evidência: ícones na mesma linha, sem aumentar a altura. */}
-          <div className={cn("flex gap-0.5", !(r.resposta === "CONFORME" && !mostrarObservacao) && !(comFotos && r.resposta && fotos.length < FOTOS_POR_PERGUNTA) && "max-sm:hidden")}>
+          <div className={cn("relative flex gap-0.5", !(r.resposta === "CONFORME" && !mostrarObservacao) && !(comFotos && r.resposta && fotos.length < FOTOS_POR_PERGUNTA) && "max-sm:hidden")}>
             <AcaoLinha
               icone={MessageSquarePlus}
               rotulo={`Adicionar observação: ${p.texto}`}

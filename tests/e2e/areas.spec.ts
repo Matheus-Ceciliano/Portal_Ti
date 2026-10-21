@@ -54,9 +54,9 @@ test.describe("Supervisor TI", () => {
       for (const item of ["TDV", "Integrações", "Auditoria", "Configurações"]) {
         await expect(painel.getByRole("link", { name: item })).toBeVisible();
       }
-      // À direita da barra (240 px) e dentro da tela.
+      // À direita da barra (240 px) e dentro da tela, depois da animação de abertura da barra.
+      await expect.poll(async () => (await painel.boundingBox())!.x).toBeGreaterThanOrEqual(240);
       const caixa = (await painel.boundingBox())!;
-      expect(caixa.x).toBeGreaterThanOrEqual(240);
       expect(caixa.y).toBeGreaterThanOrEqual(0);
       expect(caixa.y + caixa.height).toBeLessThanOrEqual(altura);
       await page.keyboard.press("Escape");
@@ -208,8 +208,8 @@ test.describe("Colaborador", () => {
     await expect(page.getByText("Emitido em 12/03/2026", { exact: false })).toBeVisible();
     await expect(page.getByText("VLR-004601")).toHaveCount(0); // equipamento de outra pessoa
     const navInferior = page.getByRole("navigation", { name: "Navegação do portal" }).last();
-    await navInferior.getByRole("link", { name: "Meus documentos" }).click();
-    await expect(page).toHaveURL(/\/portal\/documentos/);
+    await navInferior.getByRole("link", { name: "Meus termos" }).click();
+    await expect(page).toHaveURL(/\/portal\/termos/);
     await expect(page.getByText("TER-2026-0088")).toBeVisible();
 
     await page.goto("/ti");

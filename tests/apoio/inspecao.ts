@@ -98,3 +98,15 @@ export async function verificacoesDaReserva(alocacaoId: string) {
   const itens = await prisma.itemAlocacao.findMany({ where: { alocacaoId, aberto: true }, select: { ativoId: true } });
   return verificacoesNovas(itens.map((i) => i.ativoId));
 }
+
+/** Verificações (inspeção nova) do que uma transferência entrega: o equipamento e os carregadores dele na mesma alocação. */
+export async function verificacoesDaTransferencia(ativoId: string, alocacaoId: string) {
+  const carregadores = await prisma.itemAlocacao.findMany({ where: { aberto: true, alocacaoId, ativo: { notebookId: ativoId, desvinculadoEm: null } }, select: { ativoId: true } });
+  return verificacoesNovas([ativoId, ...carregadores.map((c) => c.ativoId)]);
+}
+
+/** Verificações para confirmar a entrega de uma transferência reservada. */
+export async function verificacoesDaTransferenciaReservada(transferenciaId: string) {
+  const t = await prisma.transferencia.findUniqueOrThrow({ where: { id: transferenciaId } });
+  return verificacoesDaTransferencia(t.ativoId, t.alocacaoOrigemId!);
+}

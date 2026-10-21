@@ -19,6 +19,7 @@ async function responderConforme(checklist: Locator) {
 const semRolagemHorizontal = (page: Page) => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
 
 let monitor = "";
+let entrega = "";
 
 test.describe("Inspeções técnicas (Supervisor TI)", () => {
   test.describe.configure({ mode: "serial" });
@@ -157,9 +158,10 @@ test.describe("Inspeções técnicas (Supervisor TI)", () => {
     await expect(legado).toContainText("Nova inspeção preenchida");
 
     await n.getByTestId("confirmar-alocacao").click();
-    const sucesso = page.getByText(/^Entrega AL\d{4} registrada\.$/);
+    const sucesso = page.getByText(/^Entrega AL\d{4} registrada\./);
     await expect(sucesso).toBeVisible();
     const numero = (await sucesso.textContent())!.match(/AL\d{4}/)![0];
+    entrega = numero;
 
     await page.goto(`/ti/alocacoes?busca=${numero}`);
     await page.getByRole("button", { name: `Ver detalhes de ${numero}` }).click();
@@ -170,6 +172,35 @@ test.describe("Inspeções técnicas (Supervisor TI)", () => {
     const instantaneo = page.getByTestId("dialogo-detalhes-inspecao");
     await expect(instantaneo).toContainText("Confirmou a última inspeção");
     await expect(instantaneo).toContainText("Risco leve na moldura");
+  });
+
+  test("devolução: inspeção pendente, encaminhamento sem perder o diálogo e liberação para uso", async ({ page }) => {
+    test.setTimeout(150_000);
+    expect(entrega).not.toBe("");
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`/ti/alocacoes?busca=${entrega}`);
+    await page.getByRole("button", { name: `Ver detalhes de ${entrega}` }).click();
+    const detalhe = page.getByTestId("dialogo-alocacao");
+    await detalhe.getByRole("button", { name: "Registrar devolução" }).click();
+    const dv = page.getByTestId("dialogo-devolucao");
+    await dv.getByRole("checkbox", { name: `Devolvido: ${monitor}`, exact: true }).check();
+    await dv.getByRole("button", { name: "Registrar devolução" }).click();
+    await expect(page.getByText(/Devolução DEV-\d{4}-\d{4} registrada\./)).toBeVisible();
+    await detalhe.getByRole("tab", { name: /^Equipamentos/ }).click();
+    await expect(detalhe.getByTestId("inspecao-pendente")).toBeVisible();
+    await detalhe.getByTestId("inspecao-pendente").getByRole("button", { name: "Realizar inspeção" }).click();
+
+    const d = page.getByTestId("dialogo-checklist");
+    await expect(d.getByTestId("checklist-inspecao")).toBeVisible(); // o checklist vigente é lido ao abrir
+    await responderConforme(d.getByTestId("checklist-inspecao"));
+    // Escolher o encaminhamento não pode esconder o conteúdo do diálogo.
+    for (const opcao of ["Enviar para manutenção", "Manter em avaliação", "Liberar para uso"]) {
+      await d.locator("label").filter({ hasText: opcao }).click();
+      await expect(d.getByRole("heading", { name: "Avaliação técnica" })).toBeInViewport();
+      expect(await d.evaluate((el) => el.scrollTop)).toBe(0);
+    }
+    await d.getByRole("button", { name: "Registrar inspeção" }).click();
+    await expect(page.getByText(/^Inspeção INS-\d{4}-\d{4} registrada \(apto\): equipamento disponível\.$/)).toBeVisible();
   });
 
   for (const [largura, altura] of [

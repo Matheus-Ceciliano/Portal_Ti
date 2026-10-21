@@ -14,7 +14,15 @@ import { concluirManutencao, enviarParaManutencao } from "@/server/modulos/manut
 import { cancelarTransferencia, confirmarTransferencia, transferirColaborador, transferirEmpresa } from "@/server/modulos/transferencias";
 import { MARCA, MODELO, PROCESSADOR } from "../apoio/catalogo";
 import { criarEmpresa, criarPessoa, limparBanco } from "../apoio/fabricas";
-import { cadastrarComInspecao, verificacoesNovas } from "../apoio/inspecao";
+import {
+  cadastrarComInspecao,
+  checklistDe,
+  respostasDe,
+  verificacoesConfirmando,
+  verificacoesDaTransferencia,
+  verificacoesDaTransferenciaReservada,
+  verificacoesNovas,
+} from "../apoio/inspecao";
 
 async function ator(contaId: string): Promise<Ator> {
   const a = await carregarAtor(prisma, contaId, { mfaVerificado: true });
@@ -72,6 +80,7 @@ describe("transferência entre colaboradores", () => {
       confirmacaoFisica: true,
       alocacaoAtualId: alo.id,
       observacoes: "Mudança de equipe",
+      verificacoes: await verificacoesDaTransferencia(nb.id, alo.id),
     });
     expect(r).toMatchObject({ resultado: "CONCLUIDA", repetido: false });
 
@@ -90,7 +99,8 @@ describe("transferência entre colaboradores", () => {
     }
     // Termo anterior não é apagado nem alterado; a nova alocação começa sem TER.
     expect(await prisma.termo.findUniqueOrThrow({ where: { id: ter.id } })).toMatchObject({ estado: "EMITIDO", alocacaoId: alo.id });
-    expect(await prisma.termo.count({ where: { alocacao: { numero: r.numero! } } })).toBe(0);
+    // A entrega ao novo colaborador gera o TER dela; o termo anterior continua como estava.
+    expect(await prisma.termo.count({ where: { alocacao: { numero: r.numero! } } })).toBe(1);
 
     expect(await prisma.transferencia.findFirstOrThrow({ where: { ativoId: nb.id } })).toMatchObject({
       tipo: "COLABORADOR",
@@ -126,6 +136,46 @@ describe("transferência entre colaboradores", () => {
     expect(await prisma.transferencia.count()).toBe(0);
   });
 
+  it("entrega imediata por transferência exige a mesma verificação técnica de uma nova alocação", async () => {
+    const { empresa, supervisor, ana, bruno, carla } = await cenario();
+    const { nb, c1, alo } = await entregue(supervisor, empresa.id, ana.colaboradorId);
+    const nbc = await checklistDe("NOTEBOOK");
+    const base = { ativoId: nb.id, colaboradorId: bruno.colaboradorId, modo: "ENTREGAR" as const, confirmacaoFisica: true, alocacaoAtualId: alo.id };
+    const intacto = async () => {
+      expect((await abertos(nb.id)).map((i) => i.alocacaoId)).toEqual([alo.id]);
+      expect(await prisma.transferencia.count()).toBe(0);
+      expect(await prisma.alocacao.count()).toBe(1);
+    };
+
+    // Sem verificação, ou só de parte do que é entregue (o C1 acompanha o notebook): nada muda.
+    await expect(transferirColaborador(supervisor, base)).rejects.toThrow(/confirme a condição/);
+    await expect(transferirColaborador(supervisor, { ...base, verificacoes: await verificacoesNovas([nb.id]) })).rejects.toThrow(/confirme a condição/);
+    // Inspeção nova com defeito bloqueante: não entrega.
+    const tela = respostasDe(nbc.perguntas, { tipo: "PRE_ALOCACAO" }, "CONFORME", { [nbc.v("nb.tela")]: { resposta: "NAO_CONFORME", justificativa: "Tela com linhas" } });
+    const doC1 = (await verificacoesNovas([c1.id]))[0];
+    await expect(transferirColaborador(supervisor, { ...base, verificacoes: [{ ativoId: nb.id, modo: "NOVA", inspecao: tela }, doC1] })).rejects.toThrow(/defeito bloqueante/);
+    await intacto();
+
+    // Com a verificação de cada item: confirma a última inspeção do notebook e faz uma nova do C1.
+    const r = await transferirColaborador(supervisor, { ...base, verificacoes: [...(await verificacoesConfirmando([nb.id])), doC1] });
+    expect(r.resultado).toBe("CONCLUIDA");
+    const nova = await prisma.alocacao.findUniqueOrThrow({ where: { numero: r.numero! }, include: { verificacoes: true } });
+    expect(nova.verificacoes.map((v) => [v.ativoId, v.modo]).sort()).toEqual(
+      [
+        [nb.id, "CONFIRMOU_ULTIMA"],
+        [c1.id, "NOVA_INSPECAO"],
+      ].sort(),
+    );
+
+    // Confirmar a entrega de uma transferência reservada também exige a verificação.
+    await transferirColaborador(supervisor, { ativoId: nb.id, colaboradorId: carla.colaboradorId, modo: "RESERVAR", alocacaoAtualId: nova.id });
+    const pendente = await prisma.transferencia.findFirstOrThrow({ where: { pendente: true } });
+    await expect(confirmarTransferencia(supervisor, { transferenciaId: pendente.id, confirmacaoFisica: true })).rejects.toThrow(/confirme a condição/);
+    expect((await abertos(nb.id))[0].alocacaoId).toBe(nova.id);
+    const c = await confirmarTransferencia(supervisor, { transferenciaId: pendente.id, confirmacaoFisica: true, verificacoes: await verificacoesDaTransferenciaReservada(pendente.id) });
+    expect(await prisma.verificacaoEntrega.count({ where: { alocacao: { numero: c.numero } } })).toBe(2);
+  });
+
   it("reserva: a custódia atual continua até a entrega física; depois, confirmar ou cancelar", async () => {
     const { empresa, supervisor, ana, bruno, carla } = await cenario();
     const { nb, alo } = await entregue(supervisor, empresa.id, ana.colaboradorId);
@@ -143,7 +193,7 @@ describe("transferência entre colaboradores", () => {
     ).rejects.toThrow(/transferência reservada/);
 
     await expect(confirmarTransferencia(supervisor, { transferenciaId: pendente.id, confirmacaoFisica: false })).rejects.toThrow(/Confirme a devolução/);
-    const c = await confirmarTransferencia(supervisor, { transferenciaId: pendente.id, confirmacaoFisica: true });
+    const c = await confirmarTransferencia(supervisor, { transferenciaId: pendente.id, confirmacaoFisica: true, verificacoes: await verificacoesDaTransferenciaReservada(pendente.id) });
     const agora = await abertos(nb.id);
     expect(agora).toHaveLength(1);
     expect(agora[0].alocacao).toMatchObject({ numero: c.numero, colaboradorId: bruno.colaboradorId, estado: "ATIVA" });
@@ -217,9 +267,10 @@ describe("transferência entre colaboradores", () => {
   it("duas transferências simultâneas do mesmo equipamento: só uma passa e nunca há duas alocações abertas", async () => {
     const { empresa, supervisor, ana, bruno, carla } = await cenario();
     const { nb, alo } = await entregue(supervisor, empresa.id, ana.colaboradorId);
+    const verificacoes = await verificacoesDaTransferencia(nb.id, alo.id);
     const resultados = await Promise.allSettled(
       [bruno, carla].map((p) =>
-        transferirColaborador(supervisor, { ativoId: nb.id, colaboradorId: p.colaboradorId, modo: "ENTREGAR", confirmacaoFisica: true, alocacaoAtualId: alo.id }),
+        transferirColaborador(supervisor, { ativoId: nb.id, colaboradorId: p.colaboradorId, modo: "ENTREGAR", confirmacaoFisica: true, alocacaoAtualId: alo.id, verificacoes }),
       ),
     );
     expect(resultados.filter((r) => r.status === "fulfilled")).toHaveLength(1);
@@ -242,7 +293,15 @@ describe("transferência entre colaboradores", () => {
   it("o mesmo envio repetido devolve a transferência já registrada", async () => {
     const { empresa, supervisor, ana, bruno } = await cenario();
     const { nb, alo } = await entregue(supervisor, empresa.id, ana.colaboradorId);
-    const entrada = { ativoId: nb.id, colaboradorId: bruno.colaboradorId, modo: "ENTREGAR" as const, confirmacaoFisica: true, alocacaoAtualId: alo.id, chaveRequisicao: randomUUID() };
+    const entrada = {
+      ativoId: nb.id,
+      colaboradorId: bruno.colaboradorId,
+      modo: "ENTREGAR" as const,
+      confirmacaoFisica: true,
+      alocacaoAtualId: alo.id,
+      chaveRequisicao: randomUUID(),
+      verificacoes: await verificacoesDaTransferencia(nb.id, alo.id),
+    };
     const [a, b] = await Promise.all([transferirColaborador(supervisor, entrada), transferirColaborador(supervisor, entrada)]);
     expect([a.repetido, b.repetido].sort()).toEqual([false, true]);
     expect(a.numero).toBe(b.numero);
@@ -352,7 +411,7 @@ describe("permissões no servidor", () => {
     expect((await abertos(nb.id))[0].alocacaoId).toBe(alo.id);
 
     const estagiario = await ator((await criarPessoa({ perfis: ["ESTAGIARIO_TI"], ativada: true })).contaId);
-    await confirmarTransferencia(estagiario, { transferenciaId: pendente.id, confirmacaoFisica: true });
+    await confirmarTransferencia(estagiario, { transferenciaId: pendente.id, confirmacaoFisica: true, verificacoes: await verificacoesDaTransferenciaReservada(pendente.id) });
     // Em estoque, a propriedade muda pelo Estagiário TI (com o Bruno, só para a empresa dele).
     const nb2 = await cadastrarComInspecao(supervisor, { dados: notebook(empresa.id, 5002) });
     await transferirEmpresa(estagiario, { ativoId: nb2.id, empresaDestinoId: outra.id, motivo: "Rateio", confirmacao: true, empresaAtualId: empresa.id });

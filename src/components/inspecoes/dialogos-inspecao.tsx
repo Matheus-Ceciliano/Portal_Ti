@@ -410,7 +410,8 @@ export function DialogoAvaliacaoTecnica({
                   <label
                     key={valor}
                     className={cn(
-                      "flex cursor-pointer items-start gap-2.5 rounded-xl border p-3 transition-colors",
+                      // relative: contém o rádio sr-only (sem isso, o foco nele rola o diálogo e o conteúdo some).
+                      "relative flex cursor-pointer items-start gap-2.5 rounded-xl border p-3 transition-colors",
                       "has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring",
                       marcado ? "border-primary bg-accent/60" : "hover:bg-muted/50",
                       bloqueado && "cursor-not-allowed opacity-55",

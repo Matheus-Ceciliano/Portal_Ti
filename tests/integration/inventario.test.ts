@@ -21,7 +21,7 @@ import {
   type DadosEquipamento,
 } from "@/server/modulos/inventario";
 import { concluirManutencao, enviarParaManutencao, listarManutencoes } from "@/server/modulos/manutencoes";
-import { lerPdfTermo, registrarTerAssinado } from "@/server/modulos/termos";
+import { lerPdfTermo } from "@/server/modulos/termos";
 import { alugarEquipamento } from "@/server/modulos/alugueis";
 import { MARCA, MODELO, PROCESSADOR } from "../apoio/catalogo";
 import { criarEmpresa, criarPessoa, limparBanco } from "../apoio/fabricas";
@@ -34,9 +34,8 @@ async function ator(contaId: string): Promise<Ator> {
   return a;
 }
 
-/** PNG 1×1 e PDF mínimos válidos (assinaturas de conteúdo reais). */
+/** PNG 1×1 mínimo válido (assinatura de conteúdo real). */
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
-const PDF = Buffer.from("%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n", "latin1");
 
 async function cenario() {
   const empresa = await criarEmpresa();
@@ -227,7 +226,7 @@ describe("carregadores", () => {
 });
 
 describe("alocações", () => {
-  it("entrega de vários equipamentos: custódia na entrega física, empresas preservadas, sem TER automático", async () => {
+  it("entrega de vários equipamentos: custódia na entrega física, empresas preservadas, um TER para a entrega", async () => {
     const { empresa, outra, supervisor, pessoa } = await cenario();
     const nb = await cadastrarComInspecao(supervisor, { dados: notebook(empresa.id) });
     const mon = await cadastrarComInspecao(supervisor, { dados: monitor(outra.id) });
@@ -238,7 +237,8 @@ describe("alocações", () => {
     expect(a.numero).toBe("AL0001"); // formato curto, sem ano
 
     const d = await obterAlocacao(supervisor, a.id);
-    expect(d).toMatchObject({ estado: "ATIVA", empresaColaborador: { id: pessoa.empresaId }, termos: [] });
+    // Um TER para o evento de entrega (pendente: a pessoa do teste não tem CPF no cadastro).
+    expect(d).toMatchObject({ estado: "ATIVA", empresaColaborador: { id: pessoa.empresaId }, termos: [expect.objectContaining({ tipo: "TER", situacao: "PENDENTE_CADASTRO" })] });
     expect(d.entregueEm).not.toBeNull();
     expect(Object.fromEntries(d.itens.map((i) => [i.ativo.nome ?? i.ativo.patrimonio, i.empresaProprietaria.id]))).toEqual({
       NBI5001: empresa.id,
@@ -248,7 +248,7 @@ describe("alocações", () => {
     // A propriedade do patrimônio alugado não muda com a entrega.
     expect((await prisma.ativo.findUniqueOrThrow({ where: { id: mon.id } })).empresaId).toBe(outra.id);
     const ficha = await obterEquipamento(supervisor, nb.id);
-    expect(ficha).toMatchObject({ situacao: "ALOCADO", responsavel: { id: pessoa.colaboradorId, alocacao: a.numero }, reserva: null, ter: null });
+    expect(ficha).toMatchObject({ situacao: "ALOCADO", responsavel: { id: pessoa.colaboradorId, alocacao: a.numero }, reserva: null, ter: expect.objectContaining({ estado: "RASCUNHO" }) });
     const evento = await prisma.eventoAuditoria.findFirstOrThrow({ where: { acao: "alocacao.confirmar_entrega", alvoId: a.id } });
     expect(evento.detalhe).toMatchObject({ modo: "ENTREGAR", equipamentos: 3, equipamentosDeOutraEmpresa: 1 });
   });
@@ -381,7 +381,7 @@ describe("manutenção", () => {
     const nb = await cadastrarComInspecao(supervisor, { dados: notebook(empresa.id) });
     const [c1] = await carregadoresDe(nb.id);
     const a = await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [nb.id, c1.id], modo: "ENTREGAR", verificacoes: await verificacoesNovas([nb.id, c1.id]) });
-    await registrarTerAssinado(supervisor, { alocacaoId: a.id, pdf: PDF });
+    const terAntes = await prisma.termo.findFirstOrThrow({ where: { alocacaoId: a.id } });
 
     await expect(enviarParaManutencao(supervisor, { ativoId: nb.id, motivo: "Teclado falhando", observacoes: "Teclas sem resposta" })).rejects.toThrow(/Confirme o recolhimento físico/);
     expect((await prisma.ativo.findUniqueOrThrow({ where: { id: nb.id } })).situacao).toBe("ALOCADO");
@@ -392,7 +392,7 @@ describe("manutenção", () => {
     const d = await obterAlocacao(supervisor, a.id);
     expect(d.itens.find((i) => i.ativo.id === nb.id)).toMatchObject({ aberto: false, motivoEncerramento: "MANUTENCAO" });
     expect(d.estado).toBe("ATIVA"); // o carregador continua com a pessoa
-    expect(d.termos[0]).toMatchObject({ estado: "ASSINADO", temPdf: true }); // TER não muda
+    expect(d.termos[0]).toMatchObject({ numero: terAntes.numero, estado: terAntes.estado }); // TER não muda
     const m = await prisma.manutencao.findUniqueOrThrow({ where: { id: r.id } });
     expect(m).toMatchObject({ recolhidoDeId: pessoa.colaboradorId, abertaPorNome: supervisor.nome });
     expect(m.recolhimentoConfirmadoEm).not.toBeNull();
@@ -409,30 +409,22 @@ describe("manutenção", () => {
 });
 
 describe("TER e entrega", () => {
-  it("entrega independe do TER; só PDF válido marca assinado, sem alterar a alocação; o banco recusa assinado sem PDF", async () => {
+  it("entrega independe do TER: o termo pendente não bloqueia a custódia; reserva sem TER; o banco recusa assinado sem PDF", async () => {
     const { empresa, supervisor, pessoa } = await cenario();
     const m = await cadastrarComInspecao(supervisor, { dados: monitor(empresa.id) });
     const a = await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [m.id], modo: "ENTREGAR", verificacoes: await verificacoesNovas([m.id]) });
-    expect((await obterAlocacao(supervisor, a.id)).termos).toEqual([]); // entregue, sem TER
-    await expect(registrarTerAssinado(supervisor, { alocacaoId: a.id, pdf: Buffer.from("não é pdf") })).rejects.toThrow(/PDF/);
-    const r = await registrarTerAssinado(supervisor, { alocacaoId: a.id, pdf: PDF });
-    const termo = await prisma.termo.findFirstOrThrow({ where: { alocacaoId: a.id } });
-    try {
-      expect(termo).toMatchObject({ numero: r.numero, estado: "ASSINADO", tipo: "TER", colaboradorId: pessoa.colaboradorId });
-      expect(termo.sha256Assinado).toMatch(/^[0-9a-f]{64}$/);
-      expect((await lerPdfTermo(supervisor, termo.id))?.dados.equals(PDF)).toBe(true);
-      expect((await prisma.alocacao.findUniqueOrThrow({ where: { id: a.id } })).estado).toBe("ATIVA");
-      await expect(registrarTerAssinado(supervisor, { alocacaoId: a.id, pdf: PDF })).rejects.toThrow(/já tem TER assinado/);
-      // O colaborador só baixa termo disponibilizado pela TI.
-      await expect(lerPdfTermo(await ator(pessoa.contaId), termo.id)).rejects.toBeInstanceOf(ErroAutorizacao);
-    } finally {
-      await obterArmazenamento().remover(termo.arquivoAssinadoChave!);
-    }
+    // Pessoa sem CPF no cadastro: o TER fica pendente e a entrega continua registrada.
+    const d = await obterAlocacao(supervisor, a.id);
+    expect(d.estado).toBe("ATIVA");
+    expect(d.termos).toEqual([expect.objectContaining({ tipo: "TER", situacao: "PENDENTE_CADASTRO", temPdf: false, temPdfEmitido: false })]);
+    expect((await prisma.ativo.findUniqueOrThrow({ where: { id: m.id } })).situacao).toBe("ALOCADO");
+    // Sem PDF assinado conferido não há o que baixar.
+    expect(await lerPdfTermo(await ator(pessoa.contaId), d.termos[0].id)).toBeNull();
     await expect(prisma.termo.create({ data: { numero: "TER-TESTE-1", tipo: "TER", alocacaoId: a.id, colaboradorId: pessoa.colaboradorId, estado: "ASSINADO" } })).rejects.toThrow();
 
     const mon = await cadastrarComInspecao(supervisor, { dados: monitor(empresa.id, 7002) });
     const reserva = await criarAlocacao(supervisor, { responsavelTiContaId: supervisor.contaId, colaboradorId: pessoa.colaboradorId, ativoIds: [mon.id], modo: "RESERVAR" });
-    await expect(registrarTerAssinado(supervisor, { alocacaoId: reserva.id, pdf: PDF })).rejects.toThrow(/depois da entrega física/);
+    expect((await obterAlocacao(supervisor, reserva.id)).termos).toEqual([]);
   });
 });
 

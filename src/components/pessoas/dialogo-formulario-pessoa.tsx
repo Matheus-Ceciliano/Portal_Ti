@@ -31,6 +31,7 @@ import {
   normalizarNome,
   opcoesSobrenome,
 } from "@/lib/identificadores";
+import { cpfValido, formatarCpf, somenteDigitos } from "@/lib/cpf";
 import { cn } from "@/lib/utils";
 import { acaoSalvarPessoa, acaoVerificarIdentificadores, type EstadoPessoa, type ResultadoVerificacao } from "@/server/acoes/pessoas";
 import type { CampoIdentificador } from "@/server/modulos/pessoas";
@@ -54,6 +55,8 @@ export type PessoaEditavel = {
   loginMicrosoft: string | null;
   email: string;
   fotoUrl: string | null;
+  /** CPF mascarado (***.***.***-12); o número nunca chega ao navegador. */
+  cpf: string | null;
 };
 
 const SITUACOES = [
@@ -291,6 +294,8 @@ export function DialogoFormularioPessoa({
     grupoId: pessoa?.grupoLicencaId ?? "",
     /** Só no cadastro sem grupo de licença. */
     emailInformado: "",
+    /** Digitado nesta tela; na edição, vazio mantém o CPF atual. */
+    cpf: "",
   });
   // Segundo nome digitado pela TI e o nome completo de quando foi digitado; null = calculado.
   const [segundoManual, setSegundoManual] = useState<{ valor: string; nomeBase: string } | null>(() =>
@@ -310,7 +315,7 @@ export function DialogoFormularioPessoa({
   const tratado = useRef<EstadoPessoa | null>(null);
 
   /** Erro local de cada campo some quando o campo muda. */
-  const CAMPO_ERRO: Partial<Record<keyof typeof f, string>> = { nome: "nome", sobrenome: "sobrenomeUtilizado", empresaId: "empresaId", emailInformado: "emailCorporativo" };
+  const CAMPO_ERRO: Partial<Record<keyof typeof f, string>> = { nome: "nome", sobrenome: "sobrenomeUtilizado", empresaId: "empresaId", emailInformado: "emailCorporativo", cpf: "cpf" };
   const limparErros = (...chaves: string[]) =>
     setErrosLocais((e) => (chaves.some((c) => c in e) ? Object.fromEntries(Object.entries(e).filter(([k]) => !chaves.includes(k))) : e));
   const mudar = (parcial: Partial<typeof f>) => {
@@ -455,6 +460,7 @@ export function DialogoFormularioPessoa({
     const nomePreenchido = normalizarNome(f.nome).length >= 3;
     if (!nomePreenchido) erros.nome = "Informe o nome completo.";
     if (!f.empresaId) erros.empresaId = "Selecione a empresa.";
+    if (f.cpf && !cpfValido(f.cpf)) erros.cpf = "CPF inválido: confira os 11 dígitos.";
     if (confirmarSegundo) erros.segundoNome = "Confirme o segundo nome: use o calculado ou mantenha o informado.";
     if (!edicao) {
       if (nomePreenchido && !normalizarNome(segundoNome)) erros.segundoNome = segundoCalculado === null ? SEGUNDO_NOME_INDETERMINADO : "Informe o segundo nome.";
@@ -516,6 +522,7 @@ export function DialogoFormularioPessoa({
     ["Empresa", empresaNome],
     ["Cargo", f.cargo.trim() || "—"],
     ["Departamento", f.departamento.trim() || "—"],
+    ["CPF", f.cpf ? formatarCpf(f.cpf) : pessoa?.cpf ? `${pessoa.cpf} (mantido)` : "Não informado"],
     ["Situação", SITUACOES.find((s) => s.valor === f.situacao)?.rotulo ?? f.situacao],
     ["Grupo de licença", grupo?.nome ?? "Sem grupo"],
     ["Nome do servidor/PC", finais.nomeServidorPc || "—"],
@@ -574,6 +581,7 @@ export function DialogoFormularioPessoa({
             <input type="hidden" name="empresaId" value={f.empresaId} />
             <input type="hidden" name="cargo" value={f.cargo} />
             <input type="hidden" name="departamento" value={f.departamento} />
+            <input type="hidden" name="cpf" value={somenteDigitos(f.cpf)} />
             {pessoa?.situacao !== "DESLIGADO" ? <input type="hidden" name="situacao" value={f.situacao} /> : null}
             <input type="hidden" name="grupoLicencaId" value={f.grupoId} />
             {!edicao && !grupo ? <input type="hidden" name="emailCorporativo" value={propostos.emailCorporativo} /> : null}
@@ -637,6 +645,29 @@ export function DialogoFormularioPessoa({
                   </Campo>
                   <Campo rotulo="Departamento" erro={erro("departamento")} className="lg:col-span-4">
                     {(p) => <Input {...p} value={f.departamento} onChange={(e) => mudar({ departamento: e.target.value })} autoComplete="off" />}
+                  </Campo>
+                  <Campo
+                    rotulo="CPF"
+                    erro={erro("cpf")}
+                    ajuda={
+                      edicao && pessoa?.cpf
+                        ? `Cadastrado: ${pessoa.cpf}. Preencha só para corrigir.`
+                        : "Impresso no TER. Sem ele, o termo fica pendente até o cadastro ser completado."
+                    }
+                    className="lg:col-span-4"
+                  >
+                    {(p) => (
+                      <Input
+                        {...p}
+                        value={formatarCpf(f.cpf)}
+                        onChange={(e) => mudar({ cpf: somenteDigitos(e.target.value).slice(0, 11) })}
+                        inputMode="numeric"
+                        autoComplete="off"
+                        spellCheck={false}
+                        placeholder={edicao && pessoa?.cpf ? pessoa.cpf : "000.000.000-00"}
+                        data-testid="campo-cpf"
+                      />
+                    )}
                   </Campo>
                 </Secao>
 

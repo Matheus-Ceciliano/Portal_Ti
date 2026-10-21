@@ -207,6 +207,9 @@ export function situacaoAposDesvinculo(motivo: (typeof MOTIVOS_CARREGADOR)[numbe
 /** Número da alocação: AL + sequência de pelo menos 4 dígitos (AL0001, AL0032...). */
 export const numeroAlocacao = (sequencia: number) => `AL${String(sequencia).padStart(4, "0")}`;
 
+/** Número do TER: TER0001, TER0002... (mesmo padrão das alocações). */
+export const numeroTer = (sequencia: number) => `TER${String(sequencia).padStart(4, "0")}`;
+
 /** Número legível de documento: PREFIXO-AAAA-NNNN. */
 export function numeroDocumento(prefixo: string, ano: number, sequencia: number): string {
   return `${prefixo}-${ano}-${String(sequencia).padStart(4, "0")}`;

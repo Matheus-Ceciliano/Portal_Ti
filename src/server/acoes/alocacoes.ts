@@ -14,8 +14,8 @@ import {
   type DetalheAlocacaoReal,
   type OpcoesNovaAlocacao,
 } from "@/server/modulos/alocacoes";
+import { resumoTerDaEntrega } from "@/lib/ter";
 import type { FotoEnviada } from "@/server/modulos/inventario-base";
-import { registrarTerAssinado } from "@/server/modulos/termos";
 import { lerVerificacoes } from "./inspecao-formulario";
 
 type Falha = { ok: false; erro: string };
@@ -31,6 +31,7 @@ function atualizarTelas() {
   revalidatePath("/ti/alocacoes");
   revalidatePath("/ti/inventario");
   revalidatePath("/ti/inventario/manutencoes");
+  revalidatePath("/ti/documentos/ter");
 }
 
 export async function acaoOpcoesNovaAlocacao(): Promise<{ ok: true; dados: OpcoesNovaAlocacao } | Falha> {
@@ -68,7 +69,7 @@ export async function acaoCriarAlocacao(entrada: z.input<typeof esquemaNova>, an
     return {
       ok: true,
       id: r.id,
-      mensagem: dados.data.modo === "ENTREGAR" ? `Entrega ${r.numero} registrada.` : `Reserva ${r.numero} registrada.`,
+      mensagem: dados.data.modo === "ENTREGAR" ? `Entrega ${r.numero} registrada.${resumoTerDaEntrega(r.ter)}` : `Reserva ${r.numero} registrada.`,
     };
   } catch (erro) {
     return { ok: false, erro: mensagemDeErro(erro) };
@@ -94,7 +95,7 @@ export async function acaoConfirmarEntrega(alocacaoId: string, data?: string, ve
     if (!lidas) return { ok: false, erro: "Revise a verificação técnica dos equipamentos." };
     const r = await confirmarEntrega(ator, { alocacaoId, data, verificacoes: lidas });
     atualizarTelas();
-    return { ok: true, mensagem: `Entrega ${r.numero} confirmada.` };
+    return { ok: true, mensagem: `Entrega ${r.numero} confirmada.${resumoTerDaEntrega(r.ter)}` };
   } catch (erro) {
     return { ok: false, erro: mensagemDeErro(erro) };
   }
@@ -161,17 +162,3 @@ export async function acaoRegistrarDevolucao(formData: FormData): Promise<Result
   }
 }
 
-/** PDF do TER assinado recebido de fora (GOV.BR): o portal só guarda e vincula. */
-export async function acaoRegistrarTerAssinado(formData: FormData): Promise<ResultadoAlocacao> {
-  const ator = await atorAtual();
-  if (!ator) return { ok: false, erro: SESSAO };
-  const arquivo = formData.get("pdf");
-  if (!(arquivo instanceof File) || arquivo.size === 0) return { ok: false, erro: "Selecione o PDF do termo assinado." };
-  try {
-    const r = await registrarTerAssinado(ator, { alocacaoId: String(formData.get("alocacaoId") ?? ""), pdf: Buffer.from(await arquivo.arrayBuffer()) });
-    atualizarTelas();
-    return { ok: true, mensagem: `${r.numero}: PDF assinado registrado.` };
-  } catch (erro) {
-    return { ok: false, erro: mensagemDeErro(erro) };
-  }
-}

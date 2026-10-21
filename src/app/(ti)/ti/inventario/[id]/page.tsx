@@ -1,4 +1,4 @@
-import { ArrowLeft, Building2, CalendarClock, ClipboardCheck, Cpu, History, Images, Keyboard, Laptop, Link2, MemoryStick, PackageCheck, PlugZap, Wrench } from "lucide-react";
+import { ArrowLeft, Building2, CalendarClock, ClipboardCheck, Cpu, FileSignature, History, Images, Keyboard, Laptop, Link2, MemoryStick, PackageCheck, PlugZap, Wrench } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { formatarData } from "@/components/comum/pagina";
@@ -23,6 +23,7 @@ import { listarEmpresas } from "@/server/modulos/empresas";
 import { catalogoInventario } from "@/server/modulos/categorias";
 import { obterEquipamento } from "@/server/modulos/inventario";
 import { obterPessoa } from "@/server/modulos/pessoas";
+import { tersRelacionados } from "@/server/modulos/ter";
 
 export const metadata = { title: "Equipamento" };
 
@@ -197,6 +198,9 @@ export default async function PaginaEquipamento({
   const componente = ficha.componente;
   const instalacaoAtual = componente?.instalacoes.find((i) => i.vigente) ?? null;
   const aberta = ficha.manutencoes.find((m) => m.aberta);
+  // TERs das entregas físicas em que este equipamento foi entregue (cada um com o instantâneo da entrega).
+  const veTer = !componente && pode(ator, "termo.ver");
+  const ters = veTer ? await tersRelacionados(ator, { ativoId: ficha.id }) : [];
 
   return (
     <>
@@ -439,6 +443,32 @@ export default async function PaginaEquipamento({
             ) : null}
           </Secao>
           )}
+
+          {veTer ? (
+            <Secao titulo="Termos de entrega (TER)" icone={FileSignature}>
+              {ters.length ? (
+                <ul className="flex flex-col gap-3" data-testid="ters-equipamento">
+                  {ters.map((t) => (
+                    <li key={t.id} className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="min-w-0">
+                        <Link href={`/ti/documentos/ter?ter=${t.id}`} className="tabular font-semibold text-titulo underline-offset-4 hover:underline">
+                          {t.numero}
+                        </Link>
+                        <span className="block text-[12.5px] text-muted-foreground">
+                          {t.colaborador.nome}
+                          {t.entregueEm ? ` · entrega em ${formatarData(t.entregueEm)}` : ""}
+                          {t.alocacao ? ` · ${t.alocacao.numero}` : ""}
+                        </span>
+                      </span>
+                      <Estado grupo="ter" valor={t.situacao} />
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-[13px] text-muted-foreground">Nenhum TER emitido para entregas deste equipamento.</p>
+              )}
+            </Secao>
+          ) : null}
 
           {componente ? null : (
             <Secao titulo="Empresa e aluguel" icone={Building2}>

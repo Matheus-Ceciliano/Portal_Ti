@@ -30,6 +30,9 @@ DATABASE_URL_TESTE=postgresql://vallur_dev:${senhaBanco}@localhost:${porta}/vall
 BETTER_AUTH_URL=http://localhost:3000
 BETTER_AUTH_SECRET=${segredo(32)}
 SENHA_PEPPER=${segredo(32)}
+
+CPF_CHAVE_CIFRA=${segredo(32)}
+CPF_CHAVE_HMAC=${segredo(32)}
 `;
 
 writeFileSync(destino, conteudo, { encoding: "utf8", flag: "wx" });

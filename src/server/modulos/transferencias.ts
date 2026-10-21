@@ -6,9 +6,13 @@ import type { Ator } from "@/server/authz/ator";
 import { ErroAutorizacao, ErroNegocio, executarCasoDeUso, exigirPermissao } from "@/server/authz/exigir";
 import { prisma, type Transacao } from "@/server/db";
 import { diaDe, exigirEmpresaAutorizada } from "./alugueis";
+import { fotosDasVerificacoes, prepararVerificacoes, type EntradaVerificacao } from "./inspecoes";
+import { emitirAposEntrega, registrarEntregaFisica } from "./ter";
 import {
+  descartarFotos,
   encerrarAlocacaoSemItens,
   encerrarItem,
+  gravarArquivosFotos,
   lerData,
   lerMomento,
   proximoNumeroAlocacao,
@@ -23,7 +27,8 @@ import {
  * Transferências do equipamento, com histórico e auditoria:
  * - entre colaboradores (no detalhe da alocação ativa): com a entrega física confirmada, os itens da alocação anterior são
  *   encerrados e a nova alocação ATIVA nasce na mesma transação (o equipamento nunca fica em
- *   duas alocações abertas). Sem a entrega, só uma reserva: a custódia atual continua (Q-27);
+ *   duas alocações abertas), com a mesma verificação técnica de uma nova alocação para cada
+ *   item entregue. Sem a entrega, só uma reserva: a custódia atual continua (Q-27);
  * - entre empresas (na ficha): muda a proprietária. Alocação, responsável e empresa do
  *   colaborador ficam como estão.
  * Carregadores vinculados acompanham o notebook, sem novo C1 nem renumeração. Termos
@@ -153,6 +158,23 @@ async function efetivar(tx: Transacao, ator: Ator, a: EquipamentoTravado, destin
   return { origem: { id: origem.id, numero: origem.numero, colaborador: origem.colaborador }, nova: { id: nova.id, numero }, itens: levados.length };
 }
 
+/**
+ * Verificação técnica da entrega física, a mesma de uma nova alocação: cada item da nova
+ * alocação (o equipamento e os carregadores que o acompanham) confirma a última inspeção ou
+ * traz uma nova, sem defeito bloqueante. Roda na transação, depois das regras de custódia e
+ * empresa; faltando um item, nada é gravado. As fotos gravadas entram em `gravadas` para o
+ * chamador descartá-las se a transação falhar. A entrega gera o evento e o TER do novo colaborador.
+ */
+async function verificarEntrega(tx: Transacao, ator: Ator, alocacaoId: string, quando: Date, enviadas: EntradaVerificacao[] | null | undefined, gravadas: string[]) {
+  const itens = await tx.itemAlocacao.findMany({ where: { alocacaoId }, select: { id: true, ativoId: true } });
+  const preparadas = await prepararVerificacoes(tx, itens.map((i) => i.ativoId), enviadas);
+  const fotos = fotosDasVerificacoes(preparadas);
+  if (fotos.length) exigirPermissao(ator, "evidencia.enviar");
+  await gravarArquivosFotos(fotos);
+  gravadas.push(...fotos.map((f) => f.chave));
+  return registrarEntregaFisica(tx, ator, { alocacaoId, tipo: "TRANSFERENCIA", entregueEm: quando, itens, verificacoes: preparadas });
+}
+
 /* Entre colaboradores */
 
 export type EntradaTransferenciaColaborador = {
@@ -168,6 +190,8 @@ export type EntradaTransferenciaColaborador = {
   /** Alocação que o operador viu (nula: em estoque). Se mudou no caminho, nada é gravado. */
   alocacaoAtualId: string | null;
   chaveRequisicao?: string;
+  /** ENTREGAR: verificação técnica de cada item entregue (confirmar a última inspeção ou uma nova). */
+  verificacoes?: EntradaVerificacao[];
 };
 
 export type ResultadoTransferenciaColaborador = {
@@ -176,6 +200,8 @@ export type ResultadoTransferenciaColaborador = {
   colaborador: string;
   numero: string | null;
   repetido: boolean;
+  /** Entrega física: o TER gerado para o novo colaborador. */
+  ter?: Awaited<ReturnType<typeof emitirAposEntrega>>;
 };
 
 async function repeticao(chave: string | null): Promise<ResultadoTransferenciaColaborador | null> {
@@ -219,9 +245,11 @@ export async function transferirColaborador(ator: Ator, e: EntradaTransferenciaC
     if (previstaPara && previstaPara.toISOString().slice(0, 10) < new Date().toISOString().slice(0, 10)) {
       throw new ErroNegocio("Data prevista: não pode estar no passado.");
     }
+    const gravadas: string[] = [];
 
+    let feita;
     try {
-      return await prisma.$transaction(async (tx) => {
+      feita = await prisma.$transaction(async (tx) => {
         // Trava o equipamento e só então confere: duas transferências simultâneas não passam.
         const a = await lerEquipamento(tx, e.ativoId);
         exigirNaoVinculado(a);
@@ -264,10 +292,12 @@ export async function transferirColaborador(ator: Ator, e: EntradaTransferenciaC
             tx,
             auditar(ator, origem, "ativo.transferir_colaborador", { id: a.id, descricao: rotulo }, { modo: "RESERVAR", alocacaoOrigem: item.alocacao.numero }),
           );
-          return { resultado: "RESERVADA" as const, colaborador: colaborador.nome, numero: null, repetido: false };
+          return { resultado: "RESERVADA" as const, colaborador: colaborador.nome, numero: null, repetido: false, ter: null };
         }
 
         const r = await efetivar(tx, ator, a, colaborador, quando, observacoes);
+        // A entrega física da transferência não dispensa o checklist.
+        const ter = await verificarEntrega(tx, ator, r.nova.id, quando, e.verificacoes, gravadas);
         await tx.transferencia.create({
           data: { ...base, estado: "CONCLUIDA", pendente: null, alocacaoDestinoId: r.nova.id, efetivadaEm: quando, concluidaPorNome: ator.nome },
         });
@@ -278,21 +308,28 @@ export async function transferirColaborador(ator: Ator, e: EntradaTransferenciaC
             alocacaoOrigem: r.origem.numero,
             alocacaoDestino: r.nova.numero,
             equipamentos: r.itens,
+            verificacoesTecnicas: r.itens,
+            ter: ter.numero,
           }),
         );
-        return { resultado: "CONCLUIDA" as const, colaborador: colaborador.nome, numero: r.nova.numero, repetido: false };
+        return { resultado: "CONCLUIDA" as const, colaborador: colaborador.nome, numero: r.nova.numero, repetido: false, ter };
       });
     } catch (erro) {
+      await descartarFotos(gravadas);
       // Envio repetido em paralelo: o outro pedido já gravou.
       const repetido = await repeticao(chave);
       if (repetido) return repetido;
       throw traduzirConflito(erro);
     }
+    return { ...feita, ter: await emitirAposEntrega(feita.ter, ator) };
   });
 }
 
 /** Transferência reservada → entrega física: a partir daqui o novo colaborador é responsável. */
-export async function confirmarTransferencia(ator: Ator, e: { transferenciaId: string; data?: string | null; confirmacaoFisica?: boolean }) {
+export async function confirmarTransferencia(
+  ator: Ator,
+  e: { transferenciaId: string; data?: string | null; confirmacaoFisica?: boolean; verificacoes?: EntradaVerificacao[] },
+) {
   return executarCasoDeUso(ator, async () => {
     const { origem } = exigirPermissao(ator, "alocacao.confirmar_entrega");
     exigirPermissao(ator, "devolucao.registrar");
@@ -302,9 +339,11 @@ export async function confirmarTransferencia(ator: Ator, e: { transferenciaId: s
     const quando = lerMomento(e.data, "Data da transferência");
     const previa = await prisma.transferencia.findUnique({ where: { id: e.transferenciaId }, select: { ativoId: true } });
     if (!previa) throw new ErroNegocio("Transferência não encontrada.");
+    const gravadas: string[] = [];
 
+    let feita;
     try {
-      return await prisma.$transaction(async (tx) => {
+      feita = await prisma.$transaction(async (tx) => {
         const a = await lerEquipamento(tx, previa.ativoId);
         const t = await tx.transferencia.findUniqueOrThrow({ where: { id: e.transferenciaId } });
         if (t.estado !== "PENDENTE") throw new ErroNegocio(t.estado === "CONCLUIDA" ? "Esta transferência já foi concluída." : "Esta transferência foi cancelada.");
@@ -315,6 +354,8 @@ export async function confirmarTransferencia(ator: Ator, e: { transferenciaId: s
         const destino = await tx.colaborador.findUnique({ where: { id: t.colaboradorDestinoId! }, select: { id: true, nome: true, situacao: true, empresaId: true } });
         if (!destino || destino.situacao === "DESLIGADO") throw new ErroNegocio("O colaborador de destino foi desligado. Cancele a transferência.");
         const r = await efetivar(tx, ator, a, destino, quando, t.motivo);
+        // Confirmar a reserva é a entrega física: o mesmo checklist de uma nova alocação.
+        const ter = await verificarEntrega(tx, ator, r.nova.id, quando, e.verificacoes, gravadas);
         await tx.transferencia.update({
           where: { id: t.id },
           data: { estado: "CONCLUIDA", pendente: null, alocacaoDestinoId: r.nova.id, efetivadaEm: quando, concluidaPorNome: ator.nome },
@@ -326,13 +367,17 @@ export async function confirmarTransferencia(ator: Ator, e: { transferenciaId: s
             alocacaoOrigem: r.origem.numero,
             alocacaoDestino: r.nova.numero,
             equipamentos: r.itens,
+            verificacoesTecnicas: r.itens,
+            ter: ter.numero,
           }),
         );
-        return { colaborador: destino.nome, numero: r.nova.numero };
+        return { colaborador: destino.nome, numero: r.nova.numero, ter };
       });
     } catch (erro) {
+      await descartarFotos(gravadas);
       throw traduzirConflito(erro);
     }
+    return { ...feita, ter: await emitirAposEntrega(feita.ter, ator) };
   });
 }
 

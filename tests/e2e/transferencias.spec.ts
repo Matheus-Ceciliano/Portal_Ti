@@ -24,6 +24,21 @@ async function abrirAlocacao(page: Page, numero: string) {
 
 const semRolagemHorizontal = (page: Page) => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
 
+/** Inspeção nova em cada equipamento entregue (marca "Conforme" item a item, explicitamente). */
+async function inspecionarTodos(page: Page, escopo: Locator) {
+  const cartoes = escopo.getByTestId("cartao-condicao");
+  await expect(cartoes.first()).toBeVisible();
+  for (let i = 0; i < (await cartoes.count()); i++) {
+    await cartoes.nth(i).getByRole("button", { name: "Fazer inspeção" }).click();
+    const nova = page.getByTestId("dialogo-checklist");
+    const opcoes = nova.getByTestId("checklist-inspecao").locator("label").filter({ hasText: /^Conforme$/ });
+    for (let j = 0; j < (await opcoes.count()); j++) await opcoes.nth(j).click();
+    await nova.getByRole("button", { name: "Usar esta inspeção" }).click();
+    await expect(nova).toBeHidden();
+    await expect(cartoes.nth(i)).toContainText("Nova inspeção preenchida");
+  }
+}
+
 test.describe("Transferências (Supervisor TI)", () => {
   test.use({ storageState: estado("supervisor") });
 
@@ -42,10 +57,13 @@ test.describe("Transferências (Supervisor TI)", () => {
     await page.getByRole("option", { name: /^Tatiane Freitas/ }).click();
     await c.getByRole("button", { name: "Confirmar transferência" }).click();
     await expect(c.getByText("Confirme a devolução e a entrega física do equipamento.")).toBeVisible();
+    // A entrega imediata pede a mesma verificação técnica de uma nova alocação.
+    await expect(c.getByText("Confirme a condição de cada equipamento antes da entrega.")).toBeVisible();
+    await inspecionarTodos(page, c);
     await c.getByLabel(/^Confirmo que Ricardo Moura devolveu o equipamento e que ele foi entregue fisicamente a Tatiane Freitas/).check();
     await c.getByLabel(/^Observação ou motivo/).fill("Mudança de equipe");
     await c.getByRole("button", { name: "Confirmar transferência" }).click();
-    const sucesso = page.getByText(/^Transferido para Tatiane Freitas \(AL\d{4}\)\.$/);
+    const sucesso = page.getByText(/^Transferido para Tatiane Freitas \(AL\d{4}\)\./);
     await expect(sucesso).toBeVisible();
     const numeroNovo = (await sucesso.textContent())!.match(/AL\d{4}/)![0];
     await expect(c).toBeHidden();

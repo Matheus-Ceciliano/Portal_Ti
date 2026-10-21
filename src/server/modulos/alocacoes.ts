@@ -1,10 +1,12 @@
 import type { EstadoAlocacao, Prisma } from "@/generated/prisma/client";
 import { ehComponente } from "@/lib/componentes";
 import { CATEGORIAS_COMPONENTE, ESTADOS_FISICOS, ROTULO_SITUACAO, type Situacao } from "@/lib/inventario";
+import { situacaoTer } from "@/lib/ter";
 import { registrarAuditoria } from "@/server/auditoria";
 import { carregarAtor, type Ator } from "@/server/authz/ator";
 import { alugueisQueValem, diaDe, exigirEmpresaAutorizada, notebooksDosCarregadores } from "./alugueis";
-import { fotosDasVerificacoes, prepararVerificacoes, registrarVerificacoes, type EntradaVerificacao, type InstantaneoEntrega } from "./inspecoes";
+import { fotosDasVerificacoes, prepararVerificacoes, type EntradaVerificacao, type InstantaneoEntrega } from "./inspecoes";
+import { emitirAposEntrega, registrarEntregaFisica } from "./ter";
 import { PERFIS_TI } from "@/server/authz/catalogo";
 import { ErroAutorizacao, ErroNegocio, executarCasoDeUso, exigirPermissao, pode } from "@/server/authz/exigir";
 import { prisma, type ClienteBanco } from "@/server/db";
@@ -243,7 +245,7 @@ export async function obterAlocacao(ator: Ator, id: string) {
               },
             },
             devolucoes: { orderBy: { recebidaEm: "desc" }, include: { itens: { select: { id: true } } } },
-            termos: { orderBy: { criadoEm: "desc" } },
+            termos: { orderBy: { criadoEm: "desc" }, include: { versoes: { orderBy: { versao: "desc" }, take: 1, select: { estado: true, pendencias: true } } } },
           },
         })
       : null;
@@ -343,10 +345,16 @@ export async function obterAlocacao(ator: Ator, id: string) {
         numero: t.numero,
         tipo: t.tipo,
         estado: t.estado,
+        /** TER emitido pelo portal (por evento de entrega): situação do documento e da assinatura. */
+        situacao: t.eventoEntregaId
+          ? situacaoTer({ estadoDocumento: t.estadoDocumento, estadoAssinatura: t.estadoAssinatura, pendencias: t.versoes[0]?.estado === "ERRO_GERACAO" ? t.versoes[0].pendencias : [] })
+          : null,
+        versao: t.versaoVigente,
         emitidoEm: t.emitidoEm?.toISOString() ?? null,
         assinadoEm: t.assinadoRegistradoEm?.toISOString() ?? null,
         assinadoPorNome: t.assinadoRegistradoPorNome,
         temPdf: Boolean(t.arquivoAssinadoChave),
+        temPdfEmitido: Boolean(t.eventoEntregaId && t.versaoVigente),
       })),
       historico: historico.map((m) => ({
         id: m.id,
@@ -476,7 +484,7 @@ export async function criarAlocacao(ator: Ator, entrada: EntradaAlocacao) {
     const chave = entrada.chaveRequisicao && UUID.test(entrada.chaveRequisicao) ? entrada.chaveRequisicao : null;
     if (chave) {
       const ja = await prisma.alocacao.findUnique({ where: { chaveRequisicao: chave }, select: { id: true, numero: true } });
-      if (ja) return { ...ja, repetido: true };
+      if (ja) return { ...ja, repetido: true, ter: null };
     }
     const ids = [...new Set(entrada.ativoIds)];
     if (!ids.length) throw new ErroNegocio("Selecione ao menos um equipamento.");
@@ -500,8 +508,9 @@ export async function criarAlocacao(ator: Ator, entrada: EntradaAlocacao) {
     if (fotos.length) exigirPermissao(ator, "evidencia.enviar");
     await gravarArquivosFotos(fotos);
 
+    let criada;
     try {
-      return await prisma.$transaction(async (tx) => {
+      criada = await prisma.$transaction(async (tx) => {
         // Trava os equipamentos e só então confere a situação: duas alocações simultâneas do
         // mesmo patrimônio não passam (o índice único do item aberto é a última barreira).
         // Os notebooks dos carregadores também: o aluguel do notebook decide o uso do carregador.
@@ -545,7 +554,10 @@ export async function criarAlocacao(ator: Ator, entrada: EntradaAlocacao) {
           },
           include: { itens: { select: { id: true, ativoId: true } } },
         });
-        if (entregar) await registrarVerificacoes(tx, ator, alocacao.id, alocacao.itens, verificacoes);
+        // Entrega física: evento, verificações técnicas e o TER (gerado logo após a gravação).
+        const ter = entregueEm
+          ? await registrarEntregaFisica(tx, ator, { alocacaoId: alocacao.id, tipo: "NOVA_ALOCACAO", entregueEm, itens: alocacao.itens, verificacoes })
+          : null;
         for (const a of ativos) {
           await mudarSituacao(tx, ator, { id: a.id, situacao: a.situacao as Situacao, rotulo: rotuloAtivo(a) }, entregar ? "ALOCADO" : "RESERVADO", {
             tipo: entregar ? "ENTREGA" : "RESERVA",
@@ -566,19 +578,22 @@ export async function criarAlocacao(ator: Ator, entrada: EntradaAlocacao) {
             equipamentosDeOutraEmpresa: outraEmpresa,
             responsavelTi: responsavel.nome,
             verificacoesTecnicas: entregar ? ativos.length : 0,
+            ter: ter?.numero ?? null,
           }),
         );
-        return { id: alocacao.id, numero, repetido: false };
+        return { id: alocacao.id, numero, ter };
       });
     } catch (erro) {
       await descartarFotos(fotos.map((f) => f.chave));
       // Envio repetido em paralelo: o outro pedido já gravou e este viu os equipamentos alocados.
       if (chave) {
         const ja = await prisma.alocacao.findUnique({ where: { chaveRequisicao: chave }, select: { id: true, numero: true } });
-        if (ja) return { ...ja, repetido: true };
+        if (ja) return { ...ja, repetido: true, ter: null };
       }
       throw traduzirConflito(erro);
     }
+    // A entrega já está gravada: uma falha no PDF fica no TER (com nova tentativa), não aqui.
+    return { id: criada.id, numero: criada.numero, repetido: false, ter: await emitirAposEntrega(criada.ter, ator) };
   });
 }
 
@@ -594,8 +609,9 @@ export async function confirmarEntrega(ator: Ator, entrada: { alocacaoId: string
     const fotos = fotosDasVerificacoes(verificacoes);
     if (fotos.length) exigirPermissao(ator, "evidencia.enviar");
     await gravarArquivosFotos(fotos);
+    let confirmada;
     try {
-      return await prisma.$transaction(async (tx) => {
+      confirmada = await prisma.$transaction(async (tx) => {
         const previa = await tx.alocacao.findUnique({
           where: { id: entrada.alocacaoId },
           select: { itens: { where: { aberto: true }, select: { ativoId: true, ativo: { select: { notebookId: true, desvinculadoEm: true } } } } },
@@ -613,7 +629,13 @@ export async function confirmarEntrega(ator: Ator, entrada: { alocacaoId: string
         }
         // A entrega confere de novo: o aluguel pode ter terminado desde a reserva.
         await exigirEmpresaAutorizada(tx, a.itens.map((i) => i.ativo), a.colaborador.empresaId, diaDe(entregueEm));
-        await registrarVerificacoes(tx, ator, a.id, a.itens.map((i) => ({ id: i.id, ativoId: i.ativoId })), verificacoes);
+        const ter = await registrarEntregaFisica(tx, ator, {
+          alocacaoId: a.id,
+          tipo: "CONFIRMACAO_RESERVA",
+          entregueEm,
+          itens: a.itens.map((i) => ({ id: i.id, ativoId: i.ativoId })),
+          verificacoes,
+        });
         for (const i of a.itens) {
           await mudarSituacao(tx, ator, { id: i.ativo.id, situacao: i.ativo.situacao as Situacao, rotulo: rotuloAtivo(i.ativo) }, "ALOCADO", {
             tipo: "ENTREGA",
@@ -626,14 +648,15 @@ export async function confirmarEntrega(ator: Ator, entrada: { alocacaoId: string
         await tx.alocacao.update({ where: { id: a.id }, data: { estado: "ATIVA", entregueEm, entreguePorNome: ator.nome } });
         await registrarAuditoria(
           tx,
-          auditar(ator, origem, "alocacao.confirmar_entrega", { id: a.id, descricao: a.numero }, { equipamentos: a.itens.length, verificacoesTecnicas: a.itens.length }),
+          auditar(ator, origem, "alocacao.confirmar_entrega", { id: a.id, descricao: a.numero }, { equipamentos: a.itens.length, verificacoesTecnicas: a.itens.length, ter: ter.numero }),
         );
-        return { numero: a.numero };
+        return { numero: a.numero, ter };
       });
     } catch (erro) {
       await descartarFotos(fotos.map((f) => f.chave));
       throw traduzirConflito(erro);
     }
+    return { numero: confirmada.numero, ter: await emitirAposEntrega(confirmada.ter, ator) };
   });
 }
 

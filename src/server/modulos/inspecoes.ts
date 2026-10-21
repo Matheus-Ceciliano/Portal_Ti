@@ -166,6 +166,10 @@ export async function gravarInspecao(
     concluidaEm: quando,
     responsavelContaId: ator.contaId,
     responsavelNome: ator.nome,
+    // Opcionais sem resposta ficam registradas como tal (texto e versão exibidos).
+    perguntasSemResposta: prep.perguntas
+      .filter((p) => !prep.respostas[p.chave]?.resposta)
+      .map((p) => ({ perguntaId: p.perguntaId, versaoPerguntaId: p.chave, versao: p.versao, grupo: p.grupo, pergunta: p.texto })),
   };
   const inspecao = pendente
     ? await tx.inspecaoTecnica.update({ where: { id: pendente.id }, data: dados, select: { id: true } })
@@ -238,6 +242,7 @@ export const SELECAO_RESUMO = {
   responsavelNome: true,
   canceladaEm: true,
   motivoCancelamento: true,
+  perguntasSemResposta: true,
   questionario: { select: { codigo: true, versao: true, titulo: true } },
   respostas: {
     orderBy: { ordem: "asc" },
@@ -285,8 +290,12 @@ export function resumoInspecao(i: Prisma.InspecaoTecnicaGetPayload<{ select: typ
       versao: r.versaoPergunta?.versao ?? null,
       fotos: r.fotos.map((f) => ({ id: f.id, url: urlFoto(f.id) })),
     })),
+    /** Perguntas opcionais deixadas sem resposta (nada é presumido). */
+    semResposta: (i.perguntasSemResposta as PerguntaSemResposta[] | null) ?? [],
   };
 }
+
+export type PerguntaSemResposta = { perguntaId: string; versaoPerguntaId: string; versao: number; grupo: string; pergunta: string };
 
 export type ResumoInspecao = ReturnType<typeof resumoInspecao>;
 
@@ -304,7 +313,10 @@ export async function condicoesParaEntrega(ator: Ator, ativoIds: string[]) {
   return executarCasoDeUso(ator, async () => {
     exigirGrupo(ator);
     const ids = [...new Set(ativoIds)].filter((i) => UUID.test(i)).slice(0, 30);
-    const ativos = await prisma.ativo.findMany({ where: { id: { in: ids } }, select: SELECAO_INSPECAO });
+    const ativos = (await prisma.ativo.findMany({ where: { id: { in: ids } }, select: SELECAO_INSPECAO })).sort(
+      // Equipamentos primeiro; os carregadores (que os acompanham) depois.
+      (a, b) => Number(a.categoria === "CARREGADOR") - Number(b.categoria === "CARREGADOR") || rotuloAtivo(a).localeCompare(rotuloAtivo(b), "pt-BR"),
+    );
     const checklist = leitorDeChecklists(prisma);
     const [ultimas, perguntas] = await Promise.all([
       Promise.all(ativos.map((a) => ultimaConcluida(prisma, a.id))),
@@ -414,6 +426,8 @@ export async function registrarVerificacoes(
   alocacaoId: string,
   itens: { id: string; ativoId: string }[],
   preparadas: Map<string, VerificacaoPreparada>,
+  /** Evento de entrega física (TER) a que os itens pertencem. */
+  eventoEntregaId: string | null = null,
 ) {
   const agora = new Date();
   const ativos = new Map((await tx.ativo.findMany({ where: { id: { in: itens.map((i) => i.ativoId) } }, select: SELECAO_INSPECAO })).map((a) => [a.id, a]));
@@ -443,6 +457,7 @@ export async function registrarVerificacoes(
         verificadaEm: agora,
         responsavelContaId: ator.contaId,
         responsavelNome: ator.nome,
+        eventoEntregaId,
       },
     });
   }
@@ -451,7 +466,7 @@ export async function registrarVerificacoes(
 /** Instantâneo da condição na entrega (o que o TER vai mostrar); inspeções futuras não o alteram. */
 function instantaneoEntrega(ativo: AtivoInspecao, inspecao: ResumoInspecao, modo: "CONFIRMOU_ULTIMA" | "NOVA_INSPECAO", quando: Date, ator: Ator) {
   return {
-    versao: 1,
+    versao: 2,
     equipamento: {
       id: ativo.id,
       nome: ativo.nomeDispositivo,
@@ -460,6 +475,8 @@ function instantaneoEntrega(ativo: AtivoInspecao, inspecao: ResumoInspecao, modo
       categoria: rotuloTipo(ativo),
       marca: ativo.marca,
       modelo: ativo.modelo,
+      tipo: ativo.categoria,
+      parteKit: ativo.parteKit,
     },
     inspecao: {
       id: inspecao.id,
@@ -472,6 +489,7 @@ function instantaneoEntrega(ativo: AtivoInspecao, inspecao: ResumoInspecao, modo
     },
     questionario: inspecao.questionario,
     respostas: inspecao.respostas.map(({ fotos, ...r }) => ({ ...r, fotos: fotos.map((f) => f.id) })),
+    semResposta: inspecao.semResposta,
     modo,
     verificadaEm: quando.toISOString(),
     responsavel: { contaId: ator.contaId, nome: ator.nome },

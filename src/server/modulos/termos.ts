@@ -1,59 +1,14 @@
-import { novaChavePdf, obterArmazenamento, validarPdf } from "@/server/armazenamento";
-import { registrarAuditoria } from "@/server/auditoria";
+import { obterArmazenamento } from "@/server/armazenamento";
 import type { Ator } from "@/server/authz/ator";
-import { ErroAutorizacao, ErroNegocio, executarCasoDeUso, exigirPermissao } from "@/server/authz/exigir";
+import { ErroAutorizacao, executarCasoDeUso, exigirPermissao } from "@/server/authz/exigir";
 import { prisma } from "@/server/db";
-import { proximoNumero, rotuloAtivo, sha256, UUID } from "./inventario-base";
+import { rotuloAtivo, UUID } from "./inventario-base";
 
 /**
- * TER e TDV (banco do portal). Nesta etapa o portal não emite o PDF nem integra assinatura:
- * só registra o PDF assinado recebido de fora, vinculado à alocação. O termo nunca fica
- * "assinado" sem o PDF guardado (restrição no banco) e não altera a alocação.
+ * Termos para o portal do colaborador e a lista de TDV. O TER emitido pelo portal (geração,
+ * envio, PDF assinado e conferência) fica em ./ter.ts; o termo só fica "assinado" depois da
+ * conferência, com o PDF assinado guardado (restrição no banco), e não altera a alocação.
  */
-
-/** Registra o TER assinado (PDF) de uma entrega já feita. */
-export async function registrarTerAssinado(ator: Ator, entrada: { alocacaoId: string; pdf: Buffer }) {
-  return executarCasoDeUso(ator, async () => {
-    const { origem } = exigirPermissao(ator, "termo.anexar_assinado");
-    if (!UUID.test(entrada.alocacaoId)) throw new ErroNegocio("Alocação não encontrada.");
-    validarPdf(entrada.pdf);
-    const chave = novaChavePdf("termos");
-    const resumo = sha256(entrada.pdf);
-    await obterArmazenamento().salvar(chave, entrada.pdf);
-    try {
-      return await prisma.$transaction(async (tx) => {
-        await tx.$queryRaw`SELECT id FROM "alocacao" WHERE id = ${entrada.alocacaoId} FOR UPDATE`;
-        const a = await tx.alocacao.findUnique({
-          where: { id: entrada.alocacaoId },
-          include: { termos: { where: { tipo: "TER", estado: { not: "CANCELADO" } }, orderBy: { criadoEm: "desc" } } },
-        });
-        if (!a) throw new ErroNegocio("Alocação não encontrada.");
-        if (a.estado === "RESERVADA" || a.estado === "CANCELADA") throw new ErroNegocio("O TER assinado é registrado depois da entrega física.");
-        if (a.termos.some((t) => t.estado === "ASSINADO")) throw new ErroNegocio("Esta alocação já tem TER assinado registrado.");
-        const agora = new Date();
-        const assinado = { estado: "ASSINADO" as const, arquivoAssinadoChave: chave, sha256Assinado: resumo, assinadoRegistradoEm: agora, assinadoRegistradoPorNome: ator.nome };
-        const existente = a.termos[0];
-        const termo = existente
-          ? await tx.termo.update({ where: { id: existente.id }, data: assinado })
-          : await tx.termo.create({
-              data: { numero: await proximoNumero(tx, "TER", agora), tipo: "TER", alocacaoId: a.id, colaboradorId: a.colaboradorId, ...assinado },
-            });
-        await registrarAuditoria(tx, {
-          acao: "termo.anexar_assinado",
-          resultado: "SUCESSO",
-          ator: { contaId: ator.contaId, nome: ator.nome },
-          alvo: { tipo: "termo", id: termo.id, descricao: `${termo.numero} (${a.numero})` },
-          origemPermissao: origem,
-          detalhe: { alocacao: a.numero, sha256: resumo, tamanho: entrada.pdf.length },
-        });
-        return { numero: termo.numero };
-      });
-    } catch (erro) {
-      await obterArmazenamento().remover(chave).catch(() => undefined);
-      throw erro;
-    }
-  });
-}
 
 /** PDF assinado para a rota autorizada: TI com escopo de grupo ou o próprio colaborador (termo disponibilizado). */
 export async function lerPdfTermo(ator: Ator, termoId: string) {

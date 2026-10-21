@@ -183,7 +183,8 @@ function Tipo({
         <label
           htmlFor={id}
           className={cn(
-            "grid size-12 cursor-pointer place-items-center rounded-md border border-dashed text-muted-foreground transition-colors hover:border-primary hover:text-primary",
+            // relative: contém o input sr-only (o foco nele não rola o diálogo).
+            "relative grid size-12 cursor-pointer place-items-center rounded-md border border-dashed text-muted-foreground transition-colors hover:border-primary hover:text-primary",
             "has-[input:focus-visible]:ring-2 has-[input:focus-visible]:ring-ring",
           )}
         >

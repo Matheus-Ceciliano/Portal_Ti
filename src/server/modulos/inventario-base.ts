@@ -6,6 +6,7 @@ import {
   FOTOS_POR_ENVIO,
   numeroAlocacao,
   numeroDocumento,
+  numeroTer,
   ROTULO_SITUACAO,
   TIPOS_FOTO,
   transicaoValida,
@@ -62,6 +63,22 @@ export async function proximoNumeroAlocacao(tx: ClienteBanco) {
     ON CONFLICT (chave) DO UPDATE SET valor = GREATEST("contador_documento".valor + 1, ${n + 1})
     RETURNING valor`;
   return numeroAlocacao(Number(valor));
+}
+
+/**
+ * Número do TER (TER0001, TER0002...): sequência única, sem reinício anual, no mesmo padrão
+ * das alocações. Parte do maior número já usado — inclusive no formato antigo (TER-AAAA-NNNN)
+ * —, então nenhum número se repete; os termos já emitidos mantêm o número que têm.
+ */
+export async function proximoNumeroTer(tx: ClienteBanco) {
+  const [{ n }] = await tx.$queryRaw<{ n: number }[]>`
+    SELECT COALESCE(MAX(COALESCE(substring("numero" from '^TER([0-9]+)$'), substring("numero" from '^TER-[0-9]{4}-([0-9]+)$'))::bigint), 0)::int AS n
+    FROM "termo" WHERE "tipo" = 'TER'`;
+  const [{ valor }] = await tx.$queryRaw<{ valor: number }[]>`
+    INSERT INTO "contador_documento" (chave, valor) VALUES ('TER', ${n + 1})
+    ON CONFLICT (chave) DO UPDATE SET valor = GREATEST("contador_documento".valor + 1, ${n + 1})
+    RETURNING valor`;
+  return numeroTer(Number(valor));
 }
 
 /** Mesma marca escrita de outro jeito ("dell", "DELL") usa a grafia já cadastrada. */

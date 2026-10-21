@@ -62,7 +62,11 @@ export async function PaginaTermos({ ator, tipo }: { ator: Ator; tipo: "TER" | "
         </div>
         <EmDesenvolvimento
           modulo={`Emissão de ${tipo}`}
-          previsao="A geração do documento a partir dos modelos oficiais ainda não está no portal. O PDF assinado é registrado nos detalhes da alocação. Os modelos da TI não foram importados (contêm dados pessoais)."
+          previsao={
+            tipo === "TER"
+              ? "O TER é emitido automaticamente na entrega física (aba TER)."
+              : "A emissão do TDV a partir do modelo oficial ainda não está no portal. Os vínculos com as condições registradas na entrega já ficam guardados para a comparação na devolução."
+          }
         />
       </div>
     </>

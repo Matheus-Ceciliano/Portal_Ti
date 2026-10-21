@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { MarcaSimulado } from "@/components/comum/pagina";
-import { ListaChamados, ListaDocumentos, ListaEquipamentos, ListaTutoriais } from "@/components/portal/blocos-portal";
+import { ListaChamados, ListaDocumentos, ListaEquipamentos, ListaTutoriais, ResumoMeusTermos } from "@/components/portal/blocos-portal";
 import { exigirPortal } from "@/server/auth/sessao";
 import { obterPainelColaborador } from "@/server/modulos/consultas";
 
@@ -21,7 +21,7 @@ function Bloco({ titulo, href, rotuloLink, children }: { titulo: string; href: s
 
 export default async function InicioPortal() {
   const ator = await exigirPortal();
-  const { equipamentos, chamados, documentos, tutoriais } = await obterPainelColaborador(ator);
+  const { equipamentos, chamados, documentos, termos, tutoriais } = await obterPainelColaborador(ator);
   const abertos = chamados.filter((c) => c.estado !== "RESOLVIDO");
 
   return (
@@ -38,8 +38,9 @@ export default async function InicioPortal() {
       <Bloco titulo={`Chamados em aberto (${abertos.length})`} href="/portal/chamados" rotuloLink="Ver histórico">
         <ListaChamados itens={abertos} />
       </Bloco>
-      <Bloco titulo="Meus documentos" href="/portal/documentos" rotuloLink="Ver documentos">
-        <ListaDocumentos itens={documentos} />
+      <Bloco titulo="Meus Termos de Responsabilidade" href="/portal/termos" rotuloLink="Ver termos">
+        {/* Sem TER emitido pelo portal, os termos anteriores disponibilizados pela TI continuam aqui. */}
+        {termos.length || !documentos.length ? <ResumoMeusTermos itens={termos} /> : <ListaDocumentos itens={documentos} />}
       </Bloco>
       <Bloco titulo="Tutoriais recentes" href="/portal/tutoriais" rotuloLink="Ver tutoriais">
         <ListaTutoriais itens={tutoriais} />

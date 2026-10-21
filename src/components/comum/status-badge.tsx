@@ -91,6 +91,30 @@ export const ESTADOS = {
     ASSINADO: { tom: "sucesso", icone: CheckCircle2, rotulo: "Assinado" },
     CANCELADO: { tom: "neutro", icone: XCircle, rotulo: "Cancelado" },
   },
+  /** TER emitido pelo portal: situação resumida (estado do documento + estado da assinatura). */
+  ter: {
+    GERANDO: { tom: "info", icone: Loader, rotulo: "Gerando" },
+    PENDENTE_CADASTRO: { tom: "atencao", icone: AlertTriangle, rotulo: "Pendente de cadastro" },
+    ERRO_GERACAO: { tom: "erro", icone: XCircle, rotulo: "Erro na geração" },
+    AGUARDANDO_ENVIO: { tom: "info", icone: Clock, rotulo: "Aguardando envio" },
+    AGUARDANDO_ASSINATURA: { tom: "atencao", icone: Clock, rotulo: "Aguardando assinatura" },
+    AGUARDANDO_CONFERENCIA: { tom: "manual", icone: Hand, rotulo: "Aguardando conferência" },
+    ASSINADO_CONFERIDO: { tom: "sucesso", icone: CheckCircle2, rotulo: "Assinado e conferido" },
+    ASSINATURA_RECUSADA: { tom: "erro", icone: Ban, rotulo: "Assinatura recusada" },
+    VALIDACAO_INDETERMINADA: { tom: "atencao", icone: AlertTriangle, rotulo: "Validação indeterminada" },
+    CANCELADO: { tom: "neutro", icone: XCircle, rotulo: "Cancelado" },
+    REGISTRO_ANTERIOR: { tom: "neutro", icone: CircleDashed, rotulo: "Registro anterior" },
+  },
+  /** TER visto pelo colaborador no portal. */
+  terColaborador: {
+    AGUARDANDO_ASSINATURA: { tom: "atencao", icone: Clock, rotulo: "Aguardando sua assinatura" },
+    AGUARDANDO_CONFERENCIA: { tom: "manual", icone: Hand, rotulo: "Arquivo recebido — aguardando conferência" },
+    ASSINADO_CONFERIDO: { tom: "sucesso", icone: CheckCircle2, rotulo: "Assinado e conferido" },
+    ASSINATURA_RECUSADA: { tom: "erro", icone: XCircle, rotulo: "Assinatura recusada" },
+    EM_ANALISE: { tom: "info", icone: Info, rotulo: "Em análise pela TI" },
+    EM_ATUALIZACAO: { tom: "neutro", icone: Loader, rotulo: "Em atualização pela TI" },
+    CANCELADO: { tom: "neutro", icone: Ban, rotulo: "Cancelado" },
+  },
   conta: {
     ATIVA: { tom: "sucesso", icone: CheckCircle2, rotulo: "Ativa" },
     BLOQUEADA: { tom: "erro", icone: Lock, rotulo: "Bloqueada" },
